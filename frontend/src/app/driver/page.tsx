@@ -2,17 +2,24 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import RequireRole from '@/components/RequireRole';
+import SeatGrid, { SeatState } from '@/components/SeatGrid';
+import ChainView from '@/components/ChainView';
+import NotificationsBell from '@/components/NotificationsBell';
 import { useAuth } from '@/context/AuthContext';
 import {
   fetchTripStops,
-  fetchBookedSeats,
+  fetchSeatMap,
+  fetchTripChains,
   bookSeatData,
+  payMpesa,
   fetchDriverTrips,
   fetchManifest,
   updateTripStatus,
+  setCurrentStop,
   TripRow,
   ManifestEntry,
   TripStop,
+  ChainLink,
   errMsg,
 } from '@/services/api';
 
@@ -31,7 +38,9 @@ export default function DriverPage() {
 
   const [boardStop, setBoardStop] = useState<number>(1);
   const [alightStop, setAlightStop] = useState<number>(4);
-  const [bookedSeats, setBookedSeats] = useState<number[]>([]);
+  const [seatStates, setSeatStates] = useState<Record<number, SeatState>>({});
+  const [chains, setChains] = useState<{ seat_number: number; links: ChainLink[] }[]>([]);
+  const [currentStop, setCurrentStopVal] = useState<number | null>(null);
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
   const [message, setMessage] = useState<string>('');
   const [phone, setPhone] = useState<string>('');
@@ -61,13 +70,17 @@ export default function DriverPage() {
       if (!id) return;
       Promise.all([
         fetchTripStops(id),
-        fetchBookedSeats(id, boardStop, alightStop),
         fetchManifest(id),
+        fetchSeatMap(id, boardStop, alightStop),
+        fetchTripChains(id),
       ])
-        .then(([stopsRes, seatsRes, manifestRes]) => {
+        .then(([stopsRes, manifestRes, mapRes, chainsRes]) => {
           setStops(stopsRes.stops);
-          setBookedSeats(seatsRes.booked_seats);
           setManifest(manifestRes.manifest);
+          const states: Record<number, SeatState> = {};
+          mapRes.seats.forEach((s) => (states[s.seat_number] = s.state));
+          setSeatStates(states);
+          setChains(chainsRes.chains);
           setError('');
         })
         .catch((err: unknown) => setError(errMsg(err)));
@@ -81,12 +94,18 @@ export default function DriverPage() {
   }, [tripId, loadTrip]);
 
   const currentTrip = trips.find((t) => t.id === tripId);
+  const isDirect = currentTrip?.route_type === 'direct';
+  const selectedChain = chains.find((c) => c.seat_number === selectedSeat);
 
-  // Refresh booked seats when board/alight segment changes.
+  // Refresh seat states when board/alight segment changes.
   useEffect(() => {
     if (boardStop < alightStop && tripId) {
-      fetchBookedSeats(tripId, boardStop, alightStop)
-        .then((data) => setBookedSeats(data.booked_seats))
+      fetchSeatMap(tripId, boardStop, alightStop)
+        .then((mapRes) => {
+          const states: Record<number, SeatState> = {};
+          mapRes.seats.forEach((s) => (states[s.seat_number] = s.state));
+          setSeatStates(states);
+        })
         .catch((err: unknown) => setError(errMsg(err)));
     }
   }, [boardStop, alightStop, tripId]);
@@ -100,12 +119,28 @@ export default function DriverPage() {
       try {
         const data = JSON.parse(event.data);
         if (data.event === 'seat_booked' && data.trip_id === tripId) {
-          fetchBookedSeats(tripId, boardStop, alightStop)
-            .then((res) => setBookedSeats(res.booked_seats));
+          fetchSeatMap(tripId, boardStop, alightStop)
+            .then((mapRes) => {
+              const states: Record<number, SeatState> = {};
+              mapRes.seats.forEach((s) => (states[s.seat_number] = s.state));
+              setSeatStates(states);
+            });
+          fetchTripChains(tripId).then((res) => setChains(res.chains));
+          fetchManifest(tripId).then((res) => setManifest(res.manifest));
         }
         if (data.event === 'trip_status' && data.trip_id === tripId) {
           setTripStatus(data.status);
           showNotice(`Trip status updated: ${data.status}`);
+        }
+        if (data.event === 'seat_freed' && data.trip_id === tripId) {
+          showNotice(`Seat #${data.seat_number} freed at ${data.stop_name ?? `stop ${data.stop_order}`}`);
+          fetchSeatMap(tripId, boardStop, alightStop)
+            .then((mapRes) => {
+              const states: Record<number, SeatState> = {};
+              mapRes.seats.forEach((s) => (states[s.seat_number] = s.state));
+              setSeatStates(states);
+            });
+          fetchTripChains(tripId).then((res) => setChains(res.chains));
         }
       } catch {
         /* ignore malformed frames */
@@ -123,6 +158,22 @@ export default function DriverPage() {
       await updateTripStatus(tripId, next);
       setTripStatus(next);
       showNotice(`Trip #${tripId} is now ${next}.`);
+    } catch (err: unknown) {
+      setError(errMsg(err));
+    }
+  };
+
+  const handleCurrentStop = async (stopOrder: number) => {
+    if (!tripId || stopOrder === currentStop) return;
+    try {
+      const res = await setCurrentStop(tripId, stopOrder);
+      setCurrentStopVal(stopOrder);
+      showNotice(
+        `Bus is at stop #${stopOrder} — ${res.released_seats} seat(s) released.` +
+          (res.released_seats > 0 ? ' Next passengers have been notified.' : ''),
+      );
+      const chainsRes = await fetchTripChains(tripId);
+      setChains(chainsRes.chains);
     } catch (err: unknown) {
       setError(errMsg(err));
     }
@@ -162,10 +213,14 @@ export default function DriverPage() {
       setShowMpesaModal(false);
       setSelectedSeat(null);
 
-      const updated = await fetchBookedSeats(tripId, boardStop, alightStop);
-      setBookedSeats(updated.booked_seats);
+      const mapRes = await fetchSeatMap(tripId, boardStop, alightStop);
+      const states: Record<number, SeatState> = {};
+      mapRes.seats.forEach((s) => (states[s.seat_number] = s.state));
+      setSeatStates(states);
       const manifestRes = await fetchManifest(tripId);
       setManifest(manifestRes.manifest);
+      const chainsRes = await fetchTripChains(tripId);
+      setChains(chainsRes.chains);
     } catch (err: unknown) {
       setMessage(errMsg(err) || 'Booking/payment failed');
     } finally {
@@ -186,6 +241,7 @@ export default function DriverPage() {
               <p className="text-slate-400 text-sm">{user?.full_name} — BUSGO Fleet</p>
             </div>
             <div className="flex items-center gap-3">
+              <NotificationsBell />
               <Link href="/" className="text-sm text-slate-400 hover:text-emerald-300 font-semibold">
                 Home
               </Link>
@@ -259,6 +315,30 @@ export default function DriverPage() {
                   Current status:{' '}
                   <span className="text-cyan-300 font-bold capitalize">{currentTrip?.status ?? tripStatus}</span>
                 </p>
+                {/* Relay control: report which stop the bus is at */}
+                {!isDirect && stops.length > 0 && (
+                  <div className="mt-5 border-t border-slate-800 pt-4">
+                    <label className="block text-xs font-bold text-slate-400 uppercase mb-2">
+                      🚍 Bus is now at stop (releases seats + notifies the next passenger in the chain)
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      {stops.map((s) => (
+                        <button
+                          key={s.id}
+                          onClick={() => handleCurrentStop(s.stop_order)}
+                          disabled={s.stop_order === currentStop}
+                          className={`px-3 py-2 rounded-xl text-xs font-bold transition ${
+                            s.stop_order === currentStop
+                              ? 'bg-emerald-500 text-slate-950'
+                              : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                          }`}
+                        >
+                          {s.stop_name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Manifest */}
@@ -332,28 +412,27 @@ export default function DriverPage() {
                   <p className="text-rose-400 text-xs font-bold mb-4">⚠️ Alighting stop must be further down the route than boarding.</p>
                 )}
 
-                <h4 className="font-bold text-slate-300 mb-3">Matatu Seating Grid (14-Seater)</h4>
-                <div className="grid grid-cols-4 gap-3 mb-6">
-                  {Array.from({ length: 14 }, (_, i) => i + 1).map((seatNum) => {
-                    const isBooked = bookedSeats.includes(seatNum);
-                    const isSelected = selectedSeat === seatNum;
+                <h4 className="font-bold text-slate-300 mb-3">
+                  Seating Grid ({currentTrip?.route_type === 'direct' ? 'Direct' : 'Stopwise'} · {currentTrip?.seat_capacity ?? 14}-seater
+                  {currentTrip?.is_electric ? ' · ⚡ Electric' : ''})
+                </h4>
+                <SeatGrid
+                  seatCapacity={currentTrip?.seat_capacity ?? 14}
+                  seatLayout={currentTrip?.seat_layout}
+                  seatStates={seatStates}
+                  selectedSeat={selectedSeat}
+                  onSelect={setSelectedSeat}
+                  disabled={boardStop >= alightStop}
+                />
 
-                    let style = 'bg-emerald-600 hover:bg-emerald-500 text-white';
-                    if (isBooked) style = 'bg-rose-600 text-white cursor-not-allowed opacity-50';
-                    if (isSelected) style = 'bg-amber-500 text-slate-950 font-black ring-4 ring-amber-300';
-
-                    return (
-                      <button
-                        key={seatNum}
-                        disabled={isBooked || boardStop >= alightStop}
-                        onClick={() => setSelectedSeat(seatNum)}
-                        className={`p-4 rounded-xl font-bold transition-all ${style}`}
-                      >
-                        {seatNum}
-                      </button>
-                    );
-                  })}
-                </div>
+                {selectedChain && (
+                  <div className="mt-4 rounded-2xl bg-slate-950 border border-slate-700 p-3">
+                    <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">
+                      🔗 Seat #{selectedSeat} relay chain
+                    </p>
+                    <ChainView seatNumber={selectedSeat ?? 0} links={selectedChain.links} />
+                  </div>
+                )}
 
                 {selectedSeat && (
                   <button

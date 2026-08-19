@@ -22,6 +22,9 @@ class VehicleType(Base):
     slug = Column(String, unique=True, nullable=False)
     display_name = Column(String, nullable=False)
     seat_capacity = Column(Integer, nullable=False)
+    # Optional layout descriptor for the frontend seat grid, e.g.
+    # {"columns": 4, "rows": [[1,2,3,4],[5,6,7,8],[9,10,11],[12,13,14]]}
+    seat_layout = Column(JSON, nullable=True)
 
     vehicles = relationship('Vehicle', back_populates='vehicle_type')
 
@@ -45,6 +48,8 @@ class Route(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     country = Column(String, nullable=False, default='KE')
+    # 'direct' => origin→destination non-stop; 'stopwise' => pickups/dropoffs anywhere
+    route_type = Column(String, nullable=False, default='stopwise')
 
     trips = relationship('Trip', back_populates='route')
     stops = relationship('RouteStop', back_populates='route', order_by='RouteStop.stop_order')
@@ -60,6 +65,8 @@ class Trip(Base):
     name = Column(String, nullable=False)
     scheduled_at = Column(TIMESTAMP(timezone=True))
     status = Column(String, nullable=False, default='scheduled')
+    # Driver-reported bus position: which stop the bus is currently at.
+    current_stop_order = Column(Integer, nullable=True)
 
     route = relationship('Route', back_populates='trips')
     vehicle = relationship('Vehicle', back_populates='trips')
@@ -102,8 +109,70 @@ class Payment(Base):
     booking_id = Column(Integer, ForeignKey('bookings.id'), nullable=False)
     provider = Column(String, nullable=False)
     provider_payload = Column(JSON, nullable=True)
+    # Real-provider tracking (M-Pesa Daraja STK push)
+    provider_reference = Column(String, nullable=True)   # e.g. CheckoutRequestID
+    callback_payload = Column(JSON, nullable=True)       # raw webhook body
+    callback_verified = Column(Boolean, nullable=False, default=False)
+    phone_number = Column(String, nullable=True)
     amount = Column(Numeric(10, 2), nullable=False)
     status = Column(String, nullable=False, default='initiated')
     created_at = Column(TIMESTAMP(timezone=True))
 
     booking = relationship('Booking', back_populates='payments')
+
+
+class SeatChain(Base):
+    """A chain of segment bookings sharing one physical seat on a trip.
+
+    The chain is the backbone of the relay/transfer feature: passengers on
+    seat 7 board/alight at consecutive stops (A→B 🔗 B→C 🔗 C→D), and each
+    passenger is notified when the seat frees up at their stop.
+    """
+    __tablename__ = 'seat_chains'
+
+    id = Column(Integer, primary_key=True, index=True)
+    trip_id = Column(Integer, ForeignKey('trips.id'), nullable=False)
+    seat_number = Column(Integer, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True))
+
+    links = relationship('SeatChainLink', back_populates='chain', order_by='SeatChainLink.position')
+
+
+class SeatChainLink(Base):
+    __tablename__ = 'seat_chain_links'
+
+    id = Column(Integer, primary_key=True, index=True)
+    chain_id = Column(Integer, ForeignKey('seat_chains.id'), nullable=False)
+    booking_id = Column(Integer, ForeignKey('bookings.id'), nullable=False)
+    position = Column(Integer, nullable=False)
+    board_stop_order = Column(Integer, nullable=False)
+    alight_stop_order = Column(Integer, nullable=False)
+
+    chain = relationship('SeatChain', back_populates='links')
+
+
+class SeatInterest(Base):
+    """Waitlist entry: "notify me when a seat frees for this segment"."""
+    __tablename__ = 'seat_interests'
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    trip_id = Column(Integer, ForeignKey('trips.id'), nullable=False)
+    board_stop_order = Column(Integer, nullable=False)
+    alight_stop_order = Column(Integer, nullable=False)
+    seat_number = Column(Integer, nullable=True)   # NULL = any seat
+    status = Column(String, nullable=False, default='active')  # active | notified | filled | cancelled
+    created_at = Column(TIMESTAMP(timezone=True))
+
+
+class Notification(Base):
+    __tablename__ = 'notifications'
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    kind = Column(String, nullable=False)          # seat_freed | chain_updated | booking_confirmed | payment_* | system
+    title = Column(String, nullable=False)
+    body = Column(Text, nullable=False)
+    payload = Column(JSON, nullable=True)
+    read = Column(Boolean, nullable=False, default=False)
+    created_at = Column(TIMESTAMP(timezone=True))

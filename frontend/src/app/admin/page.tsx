@@ -3,6 +3,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import RequireRole from '@/components/RequireRole';
+import NotificationsBell from '@/components/NotificationsBell';
 import { useAuth } from '@/context/AuthContext';
 import {
   fetchAdminVehicles,
@@ -10,6 +11,10 @@ import {
   fetchRoutes,
   fetchAdminUsers,
   fetchDriverTrips,
+  fetchAdminDrivers,
+  createDriver,
+  fetchAdminAnalytics,
+  fetchAdminPayments,
   createVehicle,
   deleteVehicle,
   createVehicleType,
@@ -23,9 +28,12 @@ import {
   Route,
   User,
   TripRow,
+  DriverRow,
+  AdminAnalytics,
+  PaymentRow,
 } from '@/services/api';
 
-type Tab = 'vehicles' | 'routes' | 'trips' | 'users';
+type Tab = 'vehicles' | 'routes' | 'trips' | 'users' | 'drivers' | 'analytics' | 'payments';
 
 export default function AdminDashboard() {
   const { user, logout } = useAuth();
@@ -39,6 +47,9 @@ export default function AdminDashboard() {
   const [routes, setRoutes] = useState<Route[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [trips, setTrips] = useState<TripRow[]>([]);
+  const [drivers, setDrivers] = useState<DriverRow[]>([]);
+  const [analytics, setAnalytics] = useState<AdminAnalytics | null>(null);
+  const [payments, setPayments] = useState<PaymentRow[]>([]);
 
   // New-vehicle form
   const [newPlate, setNewPlate] = useState('');
@@ -47,7 +58,14 @@ export default function AdminDashboard() {
 
   // New-route form
   const [newRouteName, setNewRouteName] = useState('');
+  const [newRouteType, setNewRouteType] = useState<'direct' | 'stopwise'>('stopwise');
   const [newRouteStops, setNewRouteStops] = useState('');
+
+  // New-driver form
+  const [newDriverName, setNewDriverName] = useState('');
+  const [newDriverEmail, setNewDriverEmail] = useState('');
+  const [newDriverPhone, setNewDriverPhone] = useState('');
+  const [newDriverPassword, setNewDriverPassword] = useState('');
 
   // New-trip form
   const [newTripName, setNewTripName] = useState('');
@@ -64,18 +82,24 @@ export default function AdminDashboard() {
     setLoading(true);
     setError('');
     try {
-      const [v, vt, r, u, t] = await Promise.all([
+      const [v, vt, r, u, t, d, a, p] = await Promise.all([
         fetchAdminVehicles(),
         fetchVehicleTypes(),
         fetchRoutes(),
         fetchAdminUsers(),
         fetchDriverTrips(),
+        fetchAdminDrivers(),
+        fetchAdminAnalytics(),
+        fetchAdminPayments(),
       ]);
       setVehicles(v.vehicles);
       setVehicleTypes(vt.vehicle_types);
       setRoutes(r.routes);
       setUsers(u.users);
       setTrips(t.trips);
+      setDrivers(d.drivers);
+      setAnalytics(a);
+      setPayments(p.payments);
     } catch (err: unknown) {
       setError(errMsg(err) || 'Failed to load fleet data');
     } finally {
@@ -144,11 +168,40 @@ export default function AdminDashboard() {
       setError('Route needs a name and at least 2 comma-separated stops.');
       return;
     }
+    if (newRouteType === 'direct' && stops.length > 2) {
+      setError('Direct routes have exactly 2 stops (origin, destination).');
+      return;
+    }
     try {
-      await createRoute({ name: newRouteName, stops });
+      await createRoute({ name: newRouteName, route_type: newRouteType, stops });
       setNewRouteName('');
       setNewRouteStops('');
+      setNewRouteType('stopwise');
       showNotice('Route created.');
+      loadAll();
+    } catch (err: unknown) {
+      setError(errMsg(err));
+    }
+  };
+
+  const handleCreateDriver = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newDriverName || !newDriverEmail || !newDriverPassword) {
+      setError('Driver needs a name, email and password.');
+      return;
+    }
+    try {
+      await createDriver({
+        full_name: newDriverName,
+        email: newDriverEmail,
+        phone: newDriverPhone || undefined,
+        password: newDriverPassword,
+      });
+      setNewDriverName('');
+      setNewDriverEmail('');
+      setNewDriverPhone('');
+      setNewDriverPassword('');
+      showNotice('Driver account created.');
       loadAll();
     } catch (err: unknown) {
       setError(errMsg(err));
@@ -223,6 +276,7 @@ export default function AdminDashboard() {
               <p className="text-slate-400 text-sm">BUSGO Enterprise Telemetry — {user?.full_name}</p>
             </div>
             <div className="flex items-center gap-3">
+              <NotificationsBell />
               <Link href="/" className="text-sm text-slate-400 hover:text-emerald-300 font-semibold">
                 Home
               </Link>
@@ -240,6 +294,9 @@ export default function AdminDashboard() {
             {navBtn('routes', '🛣️ Routes')}
             {navBtn('trips', '📅 Trips')}
             {navBtn('users', '👥 Users')}
+            {navBtn('drivers', '🧑‍✈️ Drivers')}
+            {navBtn('analytics', '📈 Analytics')}
+            {navBtn('payments', '💳 Payments')}
           </div>
 
           {error && (
@@ -278,12 +335,33 @@ export default function AdminDashboard() {
                   routes={routes}
                   newRouteName={newRouteName}
                   setNewRouteName={setNewRouteName}
+                  newRouteType={newRouteType}
+                  setNewRouteType={setNewRouteType}
                   newRouteStops={newRouteStops}
                   setNewRouteStops={setNewRouteStops}
                   onCreateRoute={handleCreateRoute}
                   onDeleteRoute={handleDeleteRoute}
                 />
               )}
+
+              {tab === 'drivers' && (
+                <DriversTab
+                  drivers={drivers}
+                  newDriverName={newDriverName}
+                  setNewDriverName={setNewDriverName}
+                  newDriverEmail={newDriverEmail}
+                  setNewDriverEmail={setNewDriverEmail}
+                  newDriverPhone={newDriverPhone}
+                  setNewDriverPhone={setNewDriverPhone}
+                  newDriverPassword={newDriverPassword}
+                  setNewDriverPassword={setNewDriverPassword}
+                  onCreateDriver={handleCreateDriver}
+                />
+              )}
+
+              {tab === 'analytics' && <AnalyticsTab analytics={analytics} />}
+
+              {tab === 'payments' && <PaymentsTab payments={payments} />}
 
               {tab === 'trips' && (
                 <TripTab
@@ -440,12 +518,17 @@ function RouteTab(props: {
   routes: Route[];
   newRouteName: string;
   setNewRouteName: (v: string) => void;
+  newRouteType: 'direct' | 'stopwise';
+  setNewRouteType: (v: 'direct' | 'stopwise') => void;
   newRouteStops: string;
   setNewRouteStops: (v: string) => void;
   onCreateRoute: (e: React.FormEvent) => void;
   onDeleteRoute: (id: number) => void;
 }) {
-  const { routes, newRouteName, setNewRouteName, newRouteStops, setNewRouteStops, onCreateRoute, onDeleteRoute } = props;
+  const {
+    routes, newRouteName, setNewRouteName, newRouteType, setNewRouteType,
+    newRouteStops, setNewRouteStops, onCreateRoute, onDeleteRoute,
+  } = props;
 
   return (
     <>
@@ -461,12 +544,31 @@ function RouteTab(props: {
               className="w-full p-3 border border-slate-700 rounded-xl bg-slate-950 text-white font-medium focus:outline-none focus:border-blue-500"
             />
           </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Type</label>
+            <div className="flex gap-2">
+              {(['stopwise', 'direct'] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setNewRouteType(t)}
+                  className={`px-3 py-3 rounded-xl text-sm font-bold capitalize transition ${
+                    newRouteType === t ? 'bg-blue-500 text-white' : 'bg-slate-800 text-slate-300'
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="flex-1 min-w-[280px]">
-            <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Stops (comma-separated, in order)</label>
+            <label className="block text-xs font-bold text-slate-400 uppercase mb-1">
+              Stops (comma-separated, in order)
+            </label>
             <input
               value={newRouteStops}
               onChange={(e) => setNewRouteStops(e.target.value)}
-              placeholder="Nairobi CBD, Westlands, Naivasha, Nakuru"
+              placeholder={newRouteType === 'direct' ? 'Nairobi CBD, Nakuru' : 'Nairobi CBD, Westlands, Naivasha, Nakuru'}
               className="w-full p-3 border border-slate-700 rounded-xl bg-slate-950 text-white font-medium focus:outline-none focus:border-blue-500"
             />
           </div>
@@ -474,6 +576,11 @@ function RouteTab(props: {
             Create Route
           </button>
         </form>
+        <p className="text-xs text-slate-500 mt-2">
+          {newRouteType === 'direct'
+            ? 'Direct routes are non-stop origin → destination (exactly 2 stops).'
+            : 'Stopwise routes allow boarding/alighting at every stop (relay chains).'}
+        </p>
       </div>
 
       <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
@@ -482,7 +589,16 @@ function RouteTab(props: {
           {routes.map((route) => (
             <div key={route.id} className="bg-slate-950 p-4 rounded-xl border border-slate-800">
               <div className="flex justify-between items-center mb-2">
-                <h4 className="font-bold text-white">{route.name}</h4>
+                <h4 className="font-bold text-white">
+                  {route.name}
+                  <span className={`ml-2 text-[10px] font-black px-2 py-0.5 rounded-full uppercase ${
+                    route.route_type === 'direct'
+                      ? 'bg-blue-500/10 text-blue-300'
+                      : 'bg-emerald-500/10 text-emerald-300'
+                  }`}>
+                    {route.route_type ?? 'stopwise'}
+                  </span>
+                </h4>
                 <button
                   onClick={() => onDeleteRoute(route.id)}
                   className="text-xs bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 font-bold px-2 py-1.5 rounded-lg"
@@ -675,3 +791,248 @@ function UsersTab({ users }: { users: User[] }) {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Tab: Drivers
+// ---------------------------------------------------------------------------
+function DriversTab(props: {
+  drivers: DriverRow[];
+  newDriverName: string;
+  setNewDriverName: (v: string) => void;
+  newDriverEmail: string;
+  setNewDriverEmail: (v: string) => void;
+  newDriverPhone: string;
+  setNewDriverPhone: (v: string) => void;
+  newDriverPassword: string;
+  setNewDriverPassword: (v: string) => void;
+  onCreateDriver: (e: React.FormEvent) => void;
+}) {
+  const {
+    drivers, newDriverName, setNewDriverName, newDriverEmail, setNewDriverEmail,
+    newDriverPhone, setNewDriverPhone, newDriverPassword, setNewDriverPassword, onCreateDriver,
+  } = props;
+
+  return (
+    <>
+      <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
+        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Create Driver Account</h3>
+        <form onSubmit={onCreateDriver} className="flex flex-wrap gap-3 items-end">
+          <div className="flex-1 min-w-[200px]">
+            <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Full Name</label>
+            <input
+              value={newDriverName}
+              onChange={(e) => setNewDriverName(e.target.value)}
+              placeholder="Jane Mwangi"
+              className="w-full p-3 border border-slate-700 rounded-xl bg-slate-950 text-white font-medium focus:outline-none focus:border-blue-500"
+            />
+          </div>
+          <div className="flex-1 min-w-[200px]">
+            <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Email</label>
+            <input
+              type="email"
+              value={newDriverEmail}
+              onChange={(e) => setNewDriverEmail(e.target.value)}
+              placeholder="jane@busgo.test"
+              className="w-full p-3 border border-slate-700 rounded-xl bg-slate-950 text-white font-medium focus:outline-none focus:border-blue-500"
+            />
+          </div>
+          <div className="flex-1 min-w-[160px]">
+            <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Phone</label>
+            <input
+              value={newDriverPhone}
+              onChange={(e) => setNewDriverPhone(e.target.value)}
+              placeholder="2547XXXXXXXX"
+              className="w-full p-3 border border-slate-700 rounded-xl bg-slate-950 text-white font-medium focus:outline-none focus:border-blue-500"
+            />
+          </div>
+          <div className="flex-1 min-w-[160px]">
+            <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Password</label>
+            <input
+              type="password"
+              value={newDriverPassword}
+              onChange={(e) => setNewDriverPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full p-3 border border-slate-700 rounded-xl bg-slate-950 text-white font-medium focus:outline-none focus:border-blue-500"
+            />
+          </div>
+          <button type="submit" className="px-4 py-3 bg-blue-500 hover:bg-blue-400 text-white font-black rounded-xl">
+            Create Driver
+          </button>
+        </form>
+      </div>
+
+      <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
+        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Drivers</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-slate-400 uppercase text-xs">
+                <th className="pb-3">ID</th>
+                <th className="pb-3">Name</th>
+                <th className="pb-3">Email</th>
+                <th className="pb-3">Phone</th>
+              </tr>
+            </thead>
+            <tbody>
+              {drivers.map((d) => (
+                <tr key={d.id} className="border-t border-slate-800">
+                  <td className="py-3 text-slate-400">{d.id}</td>
+                  <td className="py-3 font-semibold">{d.full_name}</td>
+                  <td className="py-3 text-slate-300">{d.email}</td>
+                  <td className="py-3 text-slate-300">{d.phone ?? '—'}</td>
+                </tr>
+              ))}
+              {drivers.length === 0 && (
+                <tr><td colSpan={4} className="py-3 text-slate-500">No drivers yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// Tab: Analytics
+// ---------------------------------------------------------------------------
+function AnalyticsTab({ analytics }: { analytics: AdminAnalytics | null }) {
+  if (!analytics) {
+    return <p className="text-slate-400">Loading analytics…</p>;
+  }
+  const { revenue, bookings_per_day, occupancy } = analytics;
+  const maxDay = Math.max(1, ...bookings_per_day.map((d) => d.bookings));
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
+        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Revenue</h3>
+        <p className="text-3xl font-black text-emerald-400">KES {revenue.total_revenue.toLocaleString()}</p>
+        <div className="mt-4 space-y-2 text-sm text-slate-300">
+          <p>✅ {revenue.completed_payments} completed payments</p>
+          <p>❌ {revenue.failed_payments} failed payments</p>
+          <p>🎫 {revenue.paid_bookings} paid bookings</p>
+        </div>
+      </div>
+
+      <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 lg:col-span-2">
+        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Bookings — last 14 days</h3>
+        {bookings_per_day.length === 0 ? (
+          <p className="text-slate-500 text-sm">No bookings recorded yet.</p>
+        ) : (
+          <div className="flex items-end gap-2 h-40">
+            {bookings_per_day.map((d) => (
+              <div key={d.day} className="flex-1 flex flex-col items-center gap-1">
+                <div
+                  className="w-full bg-blue-500/70 rounded-t-lg"
+                  style={{ height: `${Math.max(4, (d.bookings / maxDay) * 120)}px` }}
+                  title={`${d.bookings} bookings`}
+                />
+                <span className="text-[10px] text-slate-500">{d.day.slice(5)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="lg:col-span-3 bg-slate-900 p-6 rounded-2xl border border-slate-800">
+        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Trip occupancy</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-slate-400 uppercase text-xs">
+                <th className="pb-3">Trip</th>
+                <th className="pb-3">Route</th>
+                <th className="pb-3">Capacity</th>
+                <th className="pb-3">Seats taken</th>
+                <th className="pb-3">Occupancy</th>
+              </tr>
+            </thead>
+            <tbody>
+              {occupancy.map((o) => {
+                const pct = o.seat_capacity ? Math.round((o.seats_taken / o.seat_capacity) * 100) : 0;
+                return (
+                  <tr key={o.id} className="border-t border-slate-800">
+                    <td className="py-3 font-semibold">{o.name}</td>
+                    <td className="py-3 text-slate-300">{o.route_name}</td>
+                    <td className="py-3 text-slate-300">{o.seat_capacity ?? '—'}</td>
+                    <td className="py-3 text-slate-300">{o.seats_taken}</td>
+                    <td className="py-3">
+                      <div className="w-32 h-2 rounded-full bg-slate-800 overflow-hidden">
+                        <div className="h-full bg-emerald-500" style={{ width: `${pct}%` }} />
+                      </div>
+                      <span className="text-xs text-slate-400">{pct}%</span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// Tab: Payments
+// ---------------------------------------------------------------------------
+function PaymentsTab({ payments }: { payments: PaymentRow[] }) {
+  return (
+    <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
+      <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Payment log</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-slate-400 uppercase text-xs">
+              <th className="pb-3">ID</th>
+              <th className="pb-3">Provider</th>
+              <th className="pb-3">Status</th>
+              <th className="pb-3">Amount</th>
+              <th className="pb-3">Phone</th>
+              <th className="pb-3">Reference</th>
+              <th className="pb-3">Verified</th>
+              <th className="pb-3">Trip</th>
+              <th className="pb-3">Seat</th>
+            </tr>
+          </thead>
+          <tbody>
+            {payments.map((p) => (
+              <tr key={p.id} className="border-t border-slate-800">
+                <td className="py-3 text-slate-400">{p.id}</td>
+                <td className="py-3">
+                  <span className={`text-xs font-bold px-2 py-1 rounded-full ${
+                    p.provider === 'mpesa_daraja' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-slate-800 text-slate-300'
+                  }`}>
+                    {p.provider}
+                  </span>
+                </td>
+                <td className="py-3">
+                  <span className={`text-xs font-bold px-2 py-1 rounded-full capitalize ${
+                    p.status === 'completed' ? 'bg-emerald-500/10 text-emerald-300' :
+                    p.status === 'failed' ? 'bg-rose-500/10 text-rose-300' :
+                    'bg-amber-500/10 text-amber-300'
+                  }`}>
+                    {p.status}
+                  </span>
+                </td>
+                <td className="py-3 font-semibold">KES {Number(p.amount).toLocaleString()}</td>
+                <td className="py-3 text-slate-300 font-mono text-xs">{p.phone_number ?? '—'}</td>
+                <td className="py-3 text-slate-300 font-mono text-xs">{p.provider_reference ?? '—'}</td>
+                <td className="py-3">{p.callback_verified ? '✅' : '—'}</td>
+                <td className="py-3 text-slate-300">#{p.trip_id}</td>
+                <td className="py-3 text-slate-300">#{p.seat_number}</td>
+              </tr>
+            ))}
+            {payments.length === 0 && (
+              <tr><td colSpan={9} className="py-3 text-slate-500">No payments yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+

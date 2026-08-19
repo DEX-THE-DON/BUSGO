@@ -3,8 +3,17 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import RequireRole from '@/components/RequireRole';
+import NotificationsBell from '@/components/NotificationsBell';
 import { useAuth } from '@/context/AuthContext';
-import { fetchUserBookings, Booking, errMsg } from '@/services/api';
+import {
+  fetchUserBookings,
+  fetchSeatInterests,
+  deleteSeatInterest,
+  cancelBooking,
+  Booking,
+  SeatInterest,
+  errMsg,
+} from '@/services/api';
 
 const statusBadge = (status: string) => {
   const map: Record<string, string> = {
@@ -20,6 +29,7 @@ const statusBadge = (status: string) => {
 export default function UserDashboard() {
   const { user, logout } = useAuth();
   const [bookings, setBookings] = useState<Booking[]>([]);
+  const [interests, setInterests] = useState<SeatInterest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -27,8 +37,9 @@ export default function UserDashboard() {
     setLoading(true);
     setError('');
     try {
-      const res = await fetchUserBookings();
-      setBookings(res.bookings);
+      const [b, i] = await Promise.all([fetchUserBookings(), fetchSeatInterests()]);
+      setBookings(b.bookings);
+      setInterests(i.interests);
     } catch (err) {
       setError(errMsg(err) || 'Failed to load bookings');
     } finally {
@@ -47,6 +58,25 @@ export default function UserDashboard() {
   const upcoming = bookings.filter((b) => b.trip_status === 'scheduled' && b.status !== 'cancelled');
   const past = bookings.filter((b) => !upcoming.includes(b));
 
+  const handleCancel = async (bookingId: number) => {
+    if (!window.confirm('Cancel this booking? The seat will be released to other passengers.')) return;
+    try {
+      await cancelBooking(bookingId);
+      loadBookings();
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  };
+
+  const handleRemoveInterest = async (id: number) => {
+    try {
+      await deleteSeatInterest(id);
+      loadBookings();
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  };
+
   return (
     <RequireRole roles={['user']}>
       <main className="min-h-screen bg-slate-950 text-slate-100 p-8">
@@ -62,6 +92,7 @@ export default function UserDashboard() {
               </p>
             </div>
             <div className="flex items-center gap-3">
+              <NotificationsBell />
               <Link href="/" className="text-sm text-slate-400 hover:text-emerald-300 font-semibold">
                 Book a seat
               </Link>
@@ -146,6 +177,14 @@ export default function UserDashboard() {
                               <div className="flex flex-col items-end gap-1.5">
                                 <span className={statusBadge(b.status)}>{b.status}</span>
                                 <span className={statusBadge(b.payment_status)}>{b.payment_status}</span>
+                                {b.status !== 'cancelled' && (
+                                  <button
+                                    onClick={() => handleCancel(b.id)}
+                                    className="text-xs bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 font-bold px-2 py-1 rounded-lg"
+                                  >
+                                    Cancel
+                                  </button>
+                                )}
                               </div>
                             </div>
                           </div>
@@ -178,6 +217,50 @@ export default function UserDashboard() {
                               <div className="flex flex-col items-end gap-1.5">
                                 <span className={statusBadge(b.status)}>{b.status}</span>
                                 <span className={statusBadge(b.payment_status)}>{b.payment_status}</span>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Seat waitlist */}
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">
+                      🔔 Seat waitlist ({interests.length})
+                    </h3>
+                    {interests.length === 0 ? (
+                      <p className="text-sm text-slate-500">
+                        No waitlist entries.{' '}
+                        <Link href="/" className="text-emerald-400 hover:text-emerald-300 font-semibold">
+                          Watch a segment
+                        </Link>{' '}
+                        to be notified when a seat frees up.
+                      </p>
+                    ) : (
+                      <div className="space-y-3">
+                        {interests.map((i) => (
+                          <div key={i.id} className="rounded-2xl bg-slate-950/70 p-4 border border-slate-800">
+                            <div className="flex justify-between items-start gap-3">
+                              <div>
+                                <p className="font-bold text-white">{i.route_name}</p>
+                                <p className="text-sm text-slate-400">
+                                  {i.board_stop ?? 'Stop ' + i.board_stop_order} →{' '}
+                                  {i.alight_stop ?? 'Stop ' + i.alight_stop_order}
+                                </p>
+                                <p className="text-xs text-slate-500 mt-1">
+                                  {i.seat_number ? `Seat #${i.seat_number}` : 'Any seat'} · {i.trip_name}
+                                </p>
+                              </div>
+                              <div className="flex flex-col items-end gap-1.5">
+                                <span className={statusBadge(i.status)}>{i.status}</span>
+                                <button
+                                  onClick={() => handleRemoveInterest(i.id)}
+                                  className="text-xs bg-slate-800 text-slate-400 hover:bg-slate-700 font-bold px-2 py-1 rounded-lg"
+                                >
+                                  Remove
+                                </button>
                               </div>
                             </div>
                           </div>
