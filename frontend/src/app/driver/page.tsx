@@ -21,6 +21,7 @@ import {
   TripStop,
   ChainLink,
   errMsg,
+  wsBaseUrl,
 } from '@/services/api';
 
 const TRIP_STATUSES = ['scheduled', 'boarding', 'in_transit', 'completed'];
@@ -113,7 +114,7 @@ export default function DriverPage() {
   // WebSocket listener for live seat updates on the selected trip.
   useEffect(() => {
     if (!tripId) return;
-    const ws = new WebSocket(`ws://127.0.0.1:8000/ws/trip/${tripId}`);
+    const ws = new WebSocket(`${wsBaseUrl()}/ws/trip/${tripId}`);
 
     ws.onmessage = (event) => {
       try {

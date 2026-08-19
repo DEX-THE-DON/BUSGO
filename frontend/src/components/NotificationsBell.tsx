@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { getToken } from '@/services/api';
+import { getToken, wsBaseUrl } from '@/services/api';
 import {
   fetchNotifications,
   markAllNotificationsRead,
@@ -32,7 +32,7 @@ export default function NotificationsBell() {
   useEffect(() => {
     load();
     const ws = new WebSocket(
-      `ws://127.0.0.1:8000/ws/notifications?token=${encodeURIComponent(getToken() ?? '')}`,
+      `${wsBaseUrl()}/ws/notifications?token=${encodeURIComponent(getToken() ?? '')}`,
     );
     ws.onmessage = (event) => {
       try {

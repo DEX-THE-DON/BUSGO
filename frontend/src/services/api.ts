@@ -1,4 +1,13 @@
-const API_BASE_URL = 'http://127.0.0.1:8000';
+// Base URL for the BUSGO API. Override at runtime via NEXT_PUBLIC_API_URL
+// (e.g. when the frontend is opened from another device and the backend
+// lives on a different host than 127.0.0.1).
+export const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000';
+
+/** WebSocket base derived from the API base (http->ws). */
+export function wsBaseUrl(): string {
+  return API_BASE_URL.replace(/^http/, 'ws');
+}
 
 const TOKEN_KEY = 'busgo_token';
 
