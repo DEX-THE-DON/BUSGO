@@ -171,7 +171,7 @@ export default function UserDashboard() {
                                   {b.alight_stop ?? 'Stop ' + b.alight_stop_order}
                                 </p>
                                 <p className="text-xs text-slate-500 mt-1">
-                                  Seat #{b.seat_number} · {b.trip_name}
+                                  Seat <span className="font-mono tabular-nums">#{b.seat_number}</span> · {b.trip_name}
                                 </p>
                               </div>
                               <div className="flex flex-col items-end gap-1.5">
@@ -211,7 +211,7 @@ export default function UserDashboard() {
                                   {b.alight_stop ?? 'Stop ' + b.alight_stop_order}
                                 </p>
                                 <p className="text-xs text-slate-500 mt-1">
-                                  Seat #{b.seat_number} · {b.trip_name} · {b.trip_status}
+                                  Seat <span className="font-mono tabular-nums">#{b.seat_number}</span> · {b.trip_name} · {b.trip_status}
                                 </p>
                               </div>
                               <div className="flex flex-col items-end gap-1.5">

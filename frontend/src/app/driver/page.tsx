@@ -364,7 +364,7 @@ export default function DriverPage() {
                       <tbody>
                         {manifest.map((m) => (
                           <tr key={m.seat_number} className="border-t border-slate-800">
-                            <td className="py-3 font-black text-cyan-300">#{m.seat_number}</td>
+                            <td className="py-3 font-black font-mono tabular-nums text-cyan-300">#{m.seat_number}</td>
                             <td className="py-3 font-semibold">{m.full_name ?? 'Walk-up / Unregistered'}</td>
                             <td className="py-3 text-slate-300">{m.phone ?? '—'}</td>
                             <td className="py-3 text-slate-300">{m.board_stop ?? `Stop ${m.board_stop_order}`}</td>
@@ -473,7 +473,7 @@ export default function DriverPage() {
                           disabled={isPaying}
                           className="w-1/2 py-3 bg-emerald-500 hover:bg-emerald-400 font-bold rounded-xl text-slate-950 disabled:opacity-60"
                         >
-                          {isPaying ? 'Processing…' : 'Pay KES 500'}
+                          {isPaying ? 'Processing…' : 'Pay KSh 500'}
                         </button>
                       </div>
                     </div>

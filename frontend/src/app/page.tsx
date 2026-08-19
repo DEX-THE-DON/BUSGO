@@ -325,7 +325,7 @@ export default function BookingPage() {
           <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl max-w-md w-full">
             <h3 className="text-xl font-bold text-emerald-400 mb-2">M-Pesa Checkout — Seat #{pendingBooking.seat}</h3>
             <p className="text-slate-400 text-xs mb-4">
-              Enter your Safaricom number to receive an STK push for KES 500.
+              Enter your Safaricom number to receive an STK push for KSh 500.
             </p>
             <input
               type="text"
@@ -347,7 +347,7 @@ export default function BookingPage() {
                 disabled={isPaying}
                 className="w-1/2 py-3 bg-emerald-500 hover:bg-emerald-400 font-bold rounded-xl text-slate-950 disabled:opacity-60"
               >
-                {isPaying ? 'Sending push…' : paid ? 'Confirmed ✓' : 'Pay KES 500'}
+                {isPaying ? 'Sending push…' : paid ? 'Confirmed ✓' : 'Pay KSh 500'}
               </button>
             </div>
           </div>

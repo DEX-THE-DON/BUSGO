@@ -4,6 +4,8 @@ import React, { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import RequireRole from '@/components/RequireRole';
 import NotificationsBell from '@/components/NotificationsBell';
+import MetricCard from '@/components/MetricCard';
+import { formatKSh, formatKShCompact } from '@/lib/format';
 import { useAuth } from '@/context/AuthContext';
 import {
   fetchAdminVehicles,
@@ -459,7 +461,7 @@ function VehicleTab(props: {
               <div>
                 <h4 className="font-bold text-lg text-white">{bus.plate_number}</h4>
                 <p className="text-xs text-slate-400 capitalize">
-                  Tier: {bus.category.replace('_', ' ')} ({bus.seat_capacity} Seats)
+                  Tier: {bus.category.replace('_', ' ')} (<span className="font-mono tabular-nums text-slate-300">{bus.seat_capacity}</span> Seats)
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -723,7 +725,7 @@ function TripTab(props: {
             <tbody>
               {trips.map((t) => (
                 <tr key={t.id} className="border-t border-slate-800">
-                  <td className="py-3 text-slate-400">{t.id}</td>
+                  <td className="py-3 text-slate-400 font-mono tabular-nums">{t.id}</td>
                   <td className="py-3 font-semibold">{t.name}</td>
                   <td className="py-3 text-slate-300">{t.route_name}</td>
                   <td className="py-3 text-slate-300">{t.plate_number ?? '—'}</td>
@@ -772,7 +774,7 @@ function UsersTab({ users }: { users: User[] }) {
           <tbody>
             {users.map((u) => (
               <tr key={u.id} className="border-t border-slate-800">
-                <td className="py-3 text-slate-400">{u.id}</td>
+                <td className="py-3 text-slate-400 font-mono tabular-nums">{u.id}</td>
                 <td className="py-3 font-semibold">{u.full_name}</td>
                 <td className="py-3 text-slate-300">{u.email ?? '—'}</td>
                 <td className="py-3 text-slate-300">{u.phone ?? '—'}</td>
@@ -876,7 +878,7 @@ function DriversTab(props: {
             <tbody>
               {drivers.map((d) => (
                 <tr key={d.id} className="border-t border-slate-800">
-                  <td className="py-3 text-slate-400">{d.id}</td>
+                  <td className="py-3 text-slate-400 font-mono tabular-nums">{d.id}</td>
                   <td className="py-3 font-semibold">{d.full_name}</td>
                   <td className="py-3 text-slate-300">{d.email}</td>
                   <td className="py-3 text-slate-300">{d.phone ?? '—'}</td>
@@ -895,28 +897,33 @@ function DriversTab(props: {
 
 
 // ---------------------------------------------------------------------------
-// Tab: Analytics
+// Tab: Analytics — fintech telemetry (segmented summaries + ledger)
 // ---------------------------------------------------------------------------
 function AnalyticsTab({ analytics }: { analytics: AdminAnalytics | null }) {
   if (!analytics) {
     return <p className="text-slate-400">Loading analytics…</p>;
   }
-  const { revenue, bookings_per_day, occupancy } = analytics;
+  const { revenue, revenue_prev, bookings_per_day, occupancy } = analytics;
   const maxDay = Math.max(1, ...bookings_per_day.map((d) => d.bookings));
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
-        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Revenue</h3>
-        <p className="text-3xl font-black text-emerald-400">KES {revenue.total_revenue.toLocaleString()}</p>
-        <div className="mt-4 space-y-2 text-sm text-slate-300">
-          <p>✅ {revenue.completed_payments} completed payments</p>
-          <p>❌ {revenue.failed_payments} failed payments</p>
-          <p>🎫 {revenue.paid_bookings} paid bookings</p>
-        </div>
+    <div className="space-y-6">
+      {/* Top summary widgets: Today's / Weekly / Monthly / Yearly + health */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard label="Today's revenue" value={formatKSh(revenue.today)} sub="gross collections" />
+        <MetricCard label="This week" value={formatKShCompact(revenue.week)} previous={revenue_prev.week} sub="vs previous week" />
+        <MetricCard label="This month" value={formatKShCompact(revenue.month)} previous={revenue_prev.month} sub="vs previous month" />
+        <MetricCard label="This year" value={formatKShCompact(revenue.year)} previous={revenue_prev.year} sub="vs previous year" />
       </div>
 
-      <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 lg:col-span-2">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard label="Total revenue (all time)" value={formatKShCompact(revenue.total)} />
+        <MetricCard label="Paid bookings" value={String(revenue.paid_bookings)} accent="neutral" mono={false} sub="confirmed seats" />
+        <MetricCard label="Completed payments" value={String(revenue.completed_payments)} accent="neutral" mono={false} sub="settled STK pushes" />
+        <MetricCard label="Failed payments" value={String(revenue.failed_payments)} accent={revenue.failed_payments > 0 ? 'rose' : 'emerald'} mono={false} sub="rejected transactions" />
+      </div>
+
+      <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
         <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Bookings — last 14 days</h3>
         {bookings_per_day.length === 0 ? (
           <p className="text-slate-500 text-sm">No bookings recorded yet.</p>
@@ -925,28 +932,28 @@ function AnalyticsTab({ analytics }: { analytics: AdminAnalytics | null }) {
             {bookings_per_day.map((d) => (
               <div key={d.day} className="flex-1 flex flex-col items-center gap-1">
                 <div
-                  className="w-full bg-blue-500/70 rounded-t-lg"
+                  className="w-full bg-emerald-500/70 rounded-t-lg"
                   style={{ height: `${Math.max(4, (d.bookings / maxDay) * 120)}px` }}
                   title={`${d.bookings} bookings`}
                 />
-                <span className="text-[10px] text-slate-500">{d.day.slice(5)}</span>
+                <span className="text-[10px] text-slate-500 font-mono tabular-nums">{d.day.slice(5)}</span>
               </div>
             ))}
           </div>
         )}
       </div>
 
-      <div className="lg:col-span-3 bg-slate-900 p-6 rounded-2xl border border-slate-800">
-        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Trip occupancy</h3>
+      <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
+        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Trip occupancy — fleet metrics</h3>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-left text-slate-400 uppercase text-xs">
-                <th className="pb-3">Trip</th>
-                <th className="pb-3">Route</th>
-                <th className="pb-3">Capacity</th>
-                <th className="pb-3">Seats taken</th>
-                <th className="pb-3">Occupancy</th>
+              <tr className="text-left text-slate-500 uppercase text-xs tracking-wider">
+                <th className="pb-3 font-bold">Trip</th>
+                <th className="pb-3 font-bold">Route</th>
+                <th className="pb-3 font-bold">Capacity</th>
+                <th className="pb-3 font-bold">Seats taken</th>
+                <th className="pb-3 font-bold">Efficiency</th>
               </tr>
             </thead>
             <tbody>
@@ -955,14 +962,16 @@ function AnalyticsTab({ analytics }: { analytics: AdminAnalytics | null }) {
                 return (
                   <tr key={o.id} className="border-t border-slate-800">
                     <td className="py-3 font-semibold">{o.name}</td>
-                    <td className="py-3 text-slate-300">{o.route_name}</td>
-                    <td className="py-3 text-slate-300">{o.seat_capacity ?? '—'}</td>
-                    <td className="py-3 text-slate-300">{o.seats_taken}</td>
+                    <td className="py-3 text-slate-400">{o.route_name}</td>
+                    <td className="py-3 text-slate-300 font-mono tabular-nums">{o.seat_capacity ?? '—'}</td>
+                    <td className="py-3 text-slate-300 font-mono tabular-nums">{o.seats_taken}</td>
                     <td className="py-3">
-                      <div className="w-32 h-2 rounded-full bg-slate-800 overflow-hidden">
-                        <div className="h-full bg-emerald-500" style={{ width: `${pct}%` }} />
+                      <div className="flex items-center gap-3">
+                        <div className="w-32 h-2 rounded-full bg-slate-800 overflow-hidden">
+                          <div className="h-full bg-emerald-500" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="text-xs text-emerald-400 font-mono tabular-nums">{pct}%</span>
                       </div>
-                      <span className="text-xs text-slate-400">{pct}%</span>
                     </td>
                   </tr>
                 );
@@ -1018,12 +1027,12 @@ function PaymentsTab({ payments }: { payments: PaymentRow[] }) {
                     {p.status}
                   </span>
                 </td>
-                <td className="py-3 font-semibold">KES {Number(p.amount).toLocaleString()}</td>
+                <td className="py-3 font-mono tabular-nums font-semibold">{formatKSh(p.amount)}</td>
                 <td className="py-3 text-slate-300 font-mono text-xs">{p.phone_number ?? '—'}</td>
                 <td className="py-3 text-slate-300 font-mono text-xs">{p.provider_reference ?? '—'}</td>
                 <td className="py-3">{p.callback_verified ? '✅' : '—'}</td>
-                <td className="py-3 text-slate-300">#{p.trip_id}</td>
-                <td className="py-3 text-slate-300">#{p.seat_number}</td>
+                <td className="py-3 text-slate-300 font-mono tabular-nums">#{p.trip_id}</td>
+                <td className="py-3 text-slate-300 font-mono tabular-nums">#{p.seat_number}</td>
               </tr>
             ))}
             {payments.length === 0 && (

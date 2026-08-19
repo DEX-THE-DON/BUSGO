@@ -441,11 +441,16 @@ export async function createDriver(data: { full_name: string; email: string; pho
 
 export interface AdminAnalytics {
   revenue: {
-    total_revenue: number;
+    today: number;
+    week: number;
+    month: number;
+    year: number;
+    total: number;
     paid_bookings: number;
     completed_payments: number;
     failed_payments: number;
   };
+  revenue_prev: { week: number; month: number; year: number };
   bookings_per_day: { day: string; bookings: number }[];
   occupancy: { id: number; name: string; route_name: string; seat_capacity: number | null; seats_taken: number }[];
 }

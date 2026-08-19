@@ -1330,13 +1330,34 @@ async def admin_create_driver(payload: DriverIn, db=Depends(get_async_db), _: Us
 @app.get("/api/admin/analytics")
 async def admin_analytics(db=Depends(get_async_db), _: User = Depends(require_roles('admin'))):
     """Revenue + booking/occupancy analytics for the admin dashboard."""
+    # Revenue segmented by time period (today / week / month / year), plus the
+    # previous equivalent period so the UI can render ▲/▼ trend indicators.
     revenue = (await db.execute(
         text("""
-            SELECT COALESCE(SUM(p.amount), 0) AS total_revenue,
-                   COUNT(DISTINCT p.booking_id) AS paid_bookings,
-                   COUNT(*) FILTER (WHERE p.status = 'completed') AS completed_payments,
-                   COUNT(*) FILTER (WHERE p.status = 'failed') AS failed_payments
+            SELECT
+              COALESCE(SUM(p.amount) FILTER (WHERE p.created_at >= date_trunc('day', now())), 0) AS today,
+              COALESCE(SUM(p.amount) FILTER (WHERE p.created_at >= date_trunc('week', now())), 0) AS week,
+              COALESCE(SUM(p.amount) FILTER (WHERE p.created_at >= date_trunc('month', now())), 0) AS month,
+              COALESCE(SUM(p.amount) FILTER (WHERE p.created_at >= date_trunc('year', now())), 0) AS year,
+              COALESCE(SUM(p.amount), 0) AS total,
+              COUNT(DISTINCT p.booking_id) AS paid_bookings,
+              COUNT(*) FILTER (WHERE p.status = 'completed') AS completed_payments,
+              COUNT(*) FILTER (WHERE p.status = 'failed') AS failed_payments
             FROM payments p;
+        """)
+    )).mappings().first()
+
+    prev = (await db.execute(
+        text("""
+            SELECT
+              COALESCE(SUM(p.amount) FILTER (WHERE p.created_at >= date_trunc('week', now()) - interval '7 days'
+                                              AND p.created_at < date_trunc('week', now())), 0) AS week,
+              COALESCE(SUM(p.amount) FILTER (WHERE p.created_at >= date_trunc('month', now()) - interval '1 month'
+                                              AND p.created_at < date_trunc('month', now())), 0) AS month,
+              COALESCE(SUM(p.amount) FILTER (WHERE p.created_at >= date_trunc('year', now()) - interval '1 year'
+                                              AND p.created_at < date_trunc('year', now())), 0) AS year
+            FROM payments p
+            WHERE p.status = 'completed';
         """)
     )).mappings().first()
 
@@ -1367,6 +1388,7 @@ async def admin_analytics(db=Depends(get_async_db), _: User = Depends(require_ro
 
     return {
         "revenue": dict(revenue),
+        "revenue_prev": dict(prev),
         "bookings_per_day": [dict(r) for r in per_day],
         "occupancy": [dict(r) for r in occupancy],
     }

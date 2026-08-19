@@ -64,7 +64,7 @@ export default function SeatGrid({
         title={title}
         disabled={disabled || state === 'full'}
         onClick={() => onSelect?.(seat)}
-        className={`rounded-lg p-2.5 text-sm font-bold transition-all ${style}`}
+        className={`rounded-lg p-2.5 text-sm font-bold font-mono tabular-nums transition-all ${style}`}
       >
         {seat}
       </button>
