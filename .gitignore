@@ -6,10 +6,14 @@ backend/venv/
 backend/.venv/
 .pytest_cache/
 
-# ---- Node / frontend ----
+# ---- Node / frontend + TypeScript backend ----
+node_modules/
+server/dist/
+packages/*/dist/
 frontend/node_modules/
 frontend/.next/
 frontend/out/
+*.tsbuildinfo
 npm-debug.log*
 
 # ---- Environment & secrets ----

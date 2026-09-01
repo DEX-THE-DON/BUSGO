@@ -6,10 +6,18 @@ trip — and each seat is modelled as a **relay chain** (A→B 🔗 B→C 🔗 C
 notified when the seat frees up at their stop. Overlap conflicts are prevented at the database
 level by a Postgres trigger, so double-booking is impossible even under concurrent requests.
 
-## Stack
+## Stack (100% TypeScript)
 
-- **Backend** (`backend/`): FastAPI, async SQLAlchemy 2.x, asyncpg, Alembic, PostgreSQL
+- **Backend** (`server/`): Fastify 5, node-postgres (`pg`), Zod validation, bcrypt + JWT,
+  `ws`-based live push, OpenAPI docs at `/docs`
+- **Shared contracts** (`packages/types/`): Zod schemas + inferred types — the single source of
+  truth for every API request/response used by both the server and the frontend
 - **Frontend** (`frontend/`): Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4
+- **Database**: PostgreSQL (unchanged schema, seat-conflict trigger, relay tables)
+
+The original FastAPI backend has been fully replaced. A byte-level parity check (20/20 endpoints)
+was run against it before cutover; the Python directory may still exist in the working tree as a
+reference until you delete it.
 
 ## Features
 
@@ -32,28 +40,25 @@ level by a Postgres trigger, so double-booking is impossible even under concurre
 
 ## Running locally
 
-Prerequisites: Python 3.13+, Node 20+, a running PostgreSQL with a `busgo_db` database.
+Prerequisites: Node 20+ (Node 24 recommended), a running PostgreSQL with a `busgo_db` database.
 
 ```bash
-# 1. Backend
-python3 -m venv backend/venv
-source backend/venv/bin/activate
-pip install -r backend/requirements.txt
+# 1. Install workspace deps (server + shared types)
+npm install
 
-# apply migrations
-DATABASE_URL="postgresql+asyncpg://postgres:DEX@localhost:5432/busgo_db" \
-  python -m alembic -c backend/alembic.ini upgrade head
+# 2. Build shared types + server, then start the API (binds 0.0.0.0:8000)
+npm run build
+npm run start:server          # or detached: ./server/run_server.sh
 
-# start the API (from the project ROOT — the app imports `backend.*`)
-uvicorn backend.main:app --host 127.0.0.1 --port 8000
-# or detached: ./backend/run_backend.sh
-
-# 2. Frontend
+# 3. Frontend (separate npm project)
 cd frontend
 npm install
-npm run dev
-# → http://localhost:3000
+npm run dev                   # → http://localhost:3000
 ```
+
+`npm run dev:server` recompiles and runs the server with `node --watch` for development.
+Both servers and the shared package live in one npm workspace at the repo root; the frontend
+consumes `@busgo/types` via a `file:` dependency (type-only imports).
 
 ### Demo accounts
 
@@ -71,7 +76,8 @@ passenger boarding next gets a "seat ready" notification.
 
 Copy `.env.example` → `.env` and adjust. Key variables:
 
-- `DATABASE_URL` — async SQLAlchemy Postgres URL
+- `DATABASE_URL` — Postgres URL; `postgresql+asyncpg://…` is accepted and translated to `postgres://`
+- `PORT` / `HOST` — API binding (defaults `8000` / `0.0.0.0`)
 - `JWT_SECRET_KEY` — **must** be changed outside local dev
 - `ACCESS_TOKEN_EXPIRE_MINUTES` — token lifetime
 - `MPESA_ENV` / `MPESA_CONSUMER_KEY` / `MPESA_CONSUMER_SECRET` / `MPESA_PASSKEY` /
@@ -107,34 +113,39 @@ Interactive docs (Swagger UI) at `http://127.0.0.1:8000/docs`.
 | WS | `/ws/trip/{trip_id}` | public (live seat/status events) |
 | WS | `/ws/notifications?token=<jwt>` | authed (per-user push) |
 
-## Migrations
+## Database & migrations
 
-Alembic chain: `a1b2c3d4e5f6` (reconcile schema) → `b7c8d9e0f1a2` (dedupe stops) →
-`c3d4e5f6a7b8` (relay schema: route_type, seat chains, waitlist, notifications, payment refs) →
-`d4e5f6a7b8c9` (trips.current_stop_order).
-
-```bash
-DATABASE_URL="postgresql+asyncpg://postgres:DEX@localhost:5432/busgo_db" \
-  python -m alembic -c backend/alembic.ini upgrade head
-```
+The schema is unchanged from the FastAPI era and is created idempotently at startup
+(`server/src/seed.ts`): tables, the `check_seat_conflict` trigger, indexes, and demo data
+(vehicle types/vehicles, demo users, a sample route/trip/booking) — only when missing. The
+original Alembic migration chain under `backend/alembic/` documents the schema history.
 
 ## Project layout
 
 ```
-backend/
-  main.py            # FastAPI app: auth, booking, relay chains, payments, admin, driver, user
-  auth.py            # bcrypt + JWT + role dependencies
-  chains.py          # seat-chain engine: recompute, handoff/freed-gap notifications, stop release
-  daraja.py          # M-Pesa Daraja client (OAuth token, STK push, callback parsing)
-  ws.py              # WebSocket connection manager (trip + per-user channels)
-  models.py          # SQLAlchemy models
-  db.py              # async engine/session
-  alembic/           # migrations
+packages/types/        # Zod schemas + inferred types shared by server & frontend
+server/
+  src/index.ts         # Fastify bootstrap, CORS, Swagger, WebSocket routes, hooks
+  src/db.ts            # pg pool + per-request session (named-param SQL helper)
+  src/auth.ts          # bcrypt + JWT + role guards
+  src/chains.ts        # seat-chain engine: recompute, handoff/freed-gap notifications, stop release
+  src/daraja.ts        # M-Pesa Daraja client (OAuth token, STK push, callback parsing)
+  src/seed.ts          # idempotent schema + demo-data bootstrap
+  src/routes/          # auth, trips, bookings, payments, interests, notifications, driver, admin
+  scripts/             # smoke tests + parity check (vs the reference backend)
 frontend/
-  src/app/           # Next.js pages (/ , /login, /register, /user, /driver, /admin)
-  src/components/    # SeatGrid (bus-size aware), ChainView (relay), NotificationsBell, RequireRole
-  src/context/       # AuthContext
-  src/services/      # api.ts (typed authed client)
+  src/app/             # Next.js pages (/ , /login, /register, /user, /driver, /admin)
+  src/components/      # SeatGrid (bus-size aware), ChainView (relay), NotificationsBell, RequireRole
+  src/context/         # AuthContext
+  src/services/        # api.ts (typed authed client importing @busgo/types)
+```
+
+## Testing
+
+```bash
+npm run typecheck                    # tsc across shared types + server
+node server/scripts/parity_check.mjs # diff TS backend vs a reference backend on :8001
+node server/scripts/ws_test.mjs      # WebSocket channel smoke test
 ```
 
 ## Notes & known limitations
@@ -142,6 +153,10 @@ frontend/
 - M-Pesa Daraja works when the `MPESA_*` env vars are set; otherwise the simulated flow is used.
   The webhook is verified by matching the `CheckoutRequestID`; signature/security hardening
   (Basic-auth headers, TLS-only callbacks) is expected before production deployment.
-- CORS is open (`*`) for local development; tighten before deploying.
-- Seat-conflict trigger, index names, and column types were reconciled to the live DB via the Alembic
-  baseline migrations (the original pre-Alembic schema had drifted).
+- CORS is open for local development; tighten before deploying.
+- The seat-conflict trigger ignores a booking's `status` (including `cancelled` rows), while the
+  seat map hides cancelled rows — so a cancelled booking's seat can still trip the overlap
+  guard. This matches the original FastAPI behaviour exactly.
+- Passwords stay compatible with the previous backend (bcrypt, 12 rounds) — existing users log
+  in without a reset.
+
