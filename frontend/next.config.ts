@@ -16,6 +16,9 @@ const nextConfig: NextConfig = {
     ...LAN_HOSTS,
     ...(process.env.NEXT_PUBLIC_ALLOWED_ORIGINS?.split(",").map((s) => s.trim()).filter(Boolean) ?? []),
   ],
+  // @busgo/types ships TypeScript source (plus built dist for node); let Next
+  // transpile it so frontend API types can be shared with the server.
+  transpilePackages: ["@busgo/types"],
 };
 
 export default nextConfig;

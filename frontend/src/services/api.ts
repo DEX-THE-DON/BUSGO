@@ -50,109 +50,56 @@ async function apiFetch<T = unknown>(path: string, options: RequestInit = {}): P
 }
 
 // ---------------------------------------------------------------------------
-// Types
+// Types — shared with the backend (@busgo/types), so frontend API types can
+// never drift from the server's Zod/Pydantic schemas.
 // ---------------------------------------------------------------------------
-export interface User {
-  id: number;
-  full_name: string;
-  email?: string | null;
-  phone?: string | null;
-  role: 'admin' | 'driver' | 'user';
-}
+import type {
+  AdminAnalytics,
+  AppNotification,
+  AuthResponse,
+  Booking,
+  ChainLink,
+  DriverRow,
+  ManifestEntry,
+  PaymentRow,
+  Route,
+  RouteStop,
+  SeatInterest,
+  SeatMapEntry,
+  TripOption,
+  TripStop,
+  User,
+  Vehicle,
+  VehicleType,
+} from '@busgo/types';
 
-export interface AuthResponse {
-  access_token: string;
-  token_type: string;
-  user: User;
-}
+export type {
+  AdminAnalytics,
+  AppNotification,
+  AuthResponse,
+  Booking,
+  ChainLink,
+  DriverRow,
+  ManifestEntry,
+  PaymentRow,
+  Route,
+  RouteStop,
+  SeatInterest,
+  SeatMapEntry,
+  TripOption,
+  TripStop,
+  User,
+  Vehicle,
+  VehicleType,
+};
 
-export interface Booking {
-  id: number;
-  trip_id: number;
-  seat_number: number;
-  board_stop_order: number;
-  alight_stop_order: number;
-  status: string;
-  payment_status: string;
-  created_at: string | null;
-  trip_name: string;
-  trip_status: string;
-  route_name: string;
-  board_stop: string | null;
-  alight_stop: string | null;
-}
-
-export interface Vehicle {
-  id: number;
-  plate_number: string;
-  vehicle_type_id: number;
-  is_electric: boolean;
-  category: string;
-  vehicle_type_name: string;
-  seat_capacity: number;
-}
-
-export interface VehicleType {
-  id: number;
-  slug: string;
-  display_name: string;
-  seat_capacity: number;
-  seat_layout?: { columns: number; rows: number[][] } | null;
-}
-
-export interface RouteStop {
-  id: number;
-  stop_name: string;
-  stop_order: number;
-}
-
-export interface Route {
-  id: number;
-  name: string;
-  country: string;
-  route_type: 'direct' | 'stopwise';
-  stops: RouteStop[];
-}
-
-export interface TripRow {
-  id: number;
-  name: string;
-  status: string;
-  scheduled_at: string | null;
-  route_name: string;
-  route_type?: 'direct' | 'stopwise';
-  plate_number: string | null;
-  is_electric?: boolean;
-  seat_capacity?: number | null;
-  seat_layout?: { columns: number; rows: number[][] } | null;
-  current_stop_order?: number | null;
-}
+/** @deprecated Use `TripOption` (same wire shape, shared with the backend). */
+export type TripRow = TripOption;
 
 // ---------------------------------------------------------------------------
 // Public / passenger endpoints
 // ---------------------------------------------------------------------------
-export interface TripStop {
-  id: number;
-  stop_name: string;
-  stop_order: number;
-}
 
-export interface TripOption {
-  id: number;
-  name: string;
-  status: string;
-  scheduled_at: string | null;
-  route_id: number;
-  route_name: string;
-  route_type?: 'direct' | 'stopwise';
-  vehicle_id: number | null;
-  plate_number: string | null;
-  is_electric?: boolean;
-  vehicle_type?: string | null;
-  seat_capacity: number | null;
-  seat_layout?: { columns: number; rows: number[][] } | null;
-  current_stop_order?: number | null;
-}
 
 export async function fetchTrips() {
   return apiFetch<{ trips: TripOption[] }>('/api/trips');
@@ -296,17 +243,6 @@ export async function updateTripStatus(tripId: number, status: string) {
   });
 }
 
-export interface ManifestEntry {
-  seat_number: number;
-  user_id: number | null;
-  full_name: string | null;
-  phone: string | null;
-  board_stop_order: number;
-  alight_stop_order: number;
-  board_stop: string | null;
-  alight_stop: string | null;
-}
-
 export async function fetchManifest(tripId: number) {
   return apiFetch<{ trip_id: number; manifest: ManifestEntry[] }>(`/api/trips/${tripId}/manifest`);
 }
@@ -315,13 +251,6 @@ export async function fetchManifest(tripId: number) {
 // ---------------------------------------------------------------------------
 // Seat map, chains, waitlist & notifications (the relay feature)
 // ---------------------------------------------------------------------------
-export interface SeatMapEntry {
-  seat_number: number;
-  state: 'free' | 'partial' | 'full';
-  next_free_stop: string | null;
-  next_free_stop_order: number | null;
-}
-
 export async function fetchSeatMap(tripId: number, boardOrder: number, alightOrder: number) {
   return apiFetch<{
     trip_id: number;
@@ -332,33 +261,10 @@ export async function fetchSeatMap(tripId: number, boardOrder: number, alightOrd
   }>(`/api/trips/${tripId}/seat-map?board_order=${boardOrder}&alight_order=${alightOrder}`);
 }
 
-export interface ChainLink {
-  booking_id: number;
-  board_stop_order: number;
-  alight_stop_order: number;
-  board_stop: string | null;
-  alight_stop: string | null;
-  passenger_name: string;
-}
-
 export async function fetchTripChains(tripId: number) {
   return apiFetch<{ trip_id: number; seat_capacity: number; chains: { seat_number: number; links: ChainLink[] }[] }>(
     `/api/trips/${tripId}/chains`,
   );
-}
-
-export interface SeatInterest {
-  id: number;
-  trip_id: number;
-  board_stop_order: number;
-  alight_stop_order: number;
-  seat_number: number | null;
-  status: string;
-  created_at: string | null;
-  trip_name: string;
-  route_name: string;
-  board_stop: string | null;
-  alight_stop: string | null;
 }
 
 export async function createSeatInterest(data: {
@@ -376,16 +282,6 @@ export async function fetchSeatInterests() {
 
 export async function deleteSeatInterest(id: number) {
   return apiFetch<{ deleted: number }>(`/api/seat-interests/${id}`, { method: 'DELETE' });
-}
-
-export interface AppNotification {
-  id: number;
-  kind: string;
-  title: string;
-  body: string;
-  payload: Record<string, unknown> | null;
-  read: boolean;
-  created_at: string | null;
 }
 
 export async function fetchNotifications(limit = 30) {
@@ -423,14 +319,6 @@ export async function setCurrentStop(tripId: number, stopOrder: number) {
 // ---------------------------------------------------------------------------
 // Admin: drivers, analytics, payment log
 // ---------------------------------------------------------------------------
-export interface DriverRow {
-  id: number;
-  full_name: string;
-  email: string;
-  phone: string | null;
-  created_at: string | null;
-}
-
 export async function fetchAdminDrivers() {
   return apiFetch<{ drivers: DriverRow[] }>('/api/admin/drivers');
 }
@@ -439,37 +327,8 @@ export async function createDriver(data: { full_name: string; email: string; pho
   return apiFetch<DriverRow>('/api/admin/drivers', { method: 'POST', body: JSON.stringify(data) });
 }
 
-export interface AdminAnalytics {
-  revenue: {
-    today: number;
-    week: number;
-    month: number;
-    year: number;
-    total: number;
-    paid_bookings: number;
-    completed_payments: number;
-    failed_payments: number;
-  };
-  revenue_prev: { week: number; month: number; year: number };
-  bookings_per_day: { day: string; bookings: number }[];
-  occupancy: { id: number; name: string; route_name: string; seat_capacity: number | null; seats_taken: number }[];
-}
-
 export async function fetchAdminAnalytics() {
   return apiFetch<AdminAnalytics>('/api/admin/analytics');
-}
-
-export interface PaymentRow {
-  id: number;
-  provider: string;
-  status: string;
-  amount: number;
-  phone_number: string | null;
-  provider_reference: string | null;
-  callback_verified: boolean;
-  created_at: string | null;
-  trip_id: number;
-  seat_number: number;
 }
 
 export async function fetchAdminPayments(limit = 50) {

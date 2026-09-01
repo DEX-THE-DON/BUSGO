@@ -27,6 +27,12 @@ export default function RequireRole({ roles, children }: { roles: string[]; chil
     if (typeof window !== 'undefined') {
       router.replace('/login');
     }
+    // Redirect client‑side after render
+    React.useEffect(() => {
+      if (typeof window !== 'undefined') {
+        router.replace('/login');
+      }
+    }, []);
     return null;
   }
 
