@@ -210,7 +210,7 @@ async def _offer_gap(
         )
         # One notification per interest per offer, then park it so we don't spam.
         await db.execute(
-            text("UPDATE seat_interests SET status = 'notified' WHERE id = :id;"),
+            text("UPDATE seat_interests SET status = 'notified', notified_at = now() WHERE id = :id;"),
             {"id": interest["id"]},
         )
     if interests:

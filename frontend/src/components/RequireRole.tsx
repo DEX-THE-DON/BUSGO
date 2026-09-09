@@ -13,6 +13,14 @@ export default function RequireRole({ roles, children }: { roles: string[]; chil
   const { user, loading, requireRole } = useAuth();
   const router = useRouter();
 
+  const isAuthorized = Boolean(user && requireRole(...roles));
+
+  React.useEffect(() => {
+    if (!loading && !isAuthorized && typeof window !== 'undefined') {
+      router.replace('/login');
+    }
+  }, [loading, isAuthorized, router]);
+
   if (loading) {
     return (
       <main className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center">
@@ -21,18 +29,7 @@ export default function RequireRole({ roles, children }: { roles: string[]; chil
     );
   }
 
-  if (!user || !requireRole(...roles)) {
-    // Only redirect once per render is fine for this app; next/navigation
-    // handles client navigation without full reloads.
-    if (typeof window !== 'undefined') {
-      router.replace('/login');
-    }
-    // Redirect client‑side after render
-    React.useEffect(() => {
-      if (typeof window !== 'undefined') {
-        router.replace('/login');
-      }
-    }, []);
+  if (!isAuthorized) {
     return null;
   }
 

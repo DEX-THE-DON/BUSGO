@@ -3,11 +3,14 @@
   "private": true,
   "workspaces": [
     "server",
+    "frontend",
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace=server",
-    "build": "npm run build --workspace=server",
+    "dev": "npm run dev --workspace=frontend",
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "dev:server": "npm run dev --workspace=server",
+    "build": "npm run build --workspace=frontend",
     "lint": "eslint . --ext .ts"
   },
   "engines": {

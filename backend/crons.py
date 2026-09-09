@@ -1,0 +1,353 @@
+"""
+Automated Cron & Background Sweeper Suite for BUSGO.
+
+This module handles:
+1. sweep_expired_pending_bookings: Cancels unpaid seat bookings older than 5 minutes,
+   recomputes the corridor seat chain, frees the seat on the live map, and notifies waitlists.
+2. sweep_expired_waitlist_windows: Expires 5-minute priority claim windows for notified waitlists,
+   freeing the slot for the next passenger in line.
+3. auto_complete_arrived_trips: Automatically marks trips as 'completed' when the vehicle reaches
+   the final route stop.
+4. sweep_upcoming_departure_reminders: Automatically dispatches SMS/WhatsApp alerts for trips departing in < 30 mins.
+5. In-process asyncio cron worker loop running every 60 seconds.
+"""
+import asyncio
+import logging
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.db import AsyncSessionLocal
+from backend.ws import manager
+from backend.chains import (
+    recompute_chain,
+    notify_chain_change,
+    trip_stop_names,
+    create_notification,
+)
+from backend import dispatch
+
+logger = logging.getLogger("busgo.crons")
+logger.setLevel(logging.INFO)
+
+# Global tracker for admin observability
+CRON_STATS: Dict[str, Any] = {
+    "status": "running",
+    "worker_running": False,
+    "last_run": None,
+    "runs_count": 0,
+    "total_swept_bookings": 0,
+    "total_expired_waitlists": 0,
+    "total_completed_trips": 0,
+    "total_reminders_dispatched": 0,
+    "last_error": None,
+    "last_results": {},
+}
+
+_cron_task: Optional[asyncio.Task] = None
+
+
+async def sweep_expired_pending_bookings(db: AsyncSession, max_age_minutes: int = 5) -> Dict[str, Any]:
+    """
+    Cancel pending reservations where the user failed to complete payment within max_age_minutes.
+    Re-opens the corridor seat chain and informs waitlisted candidates.
+    """
+    query = text(f"""
+        SELECT b.id, b.trip_id, b.seat_number, b.board_stop_order, b.alight_stop_order,
+               b.user_id, b.status, b.payment_status, b.created_at,
+               t.name AS trip_name
+        FROM bookings b
+        JOIN trips t ON t.id = b.trip_id
+        WHERE b.status = 'pending'
+          AND b.created_at < (NOW() - INTERVAL '{max_age_minutes} minutes')
+        ORDER BY b.id ASC;
+    """)
+    result = await db.execute(query)
+    expired_bookings = [dict(r) for r in result.mappings().all()]
+
+    swept_ids: List[int] = []
+
+    for b in expired_bookings:
+        b_id = b["id"]
+        trip_id = b["trip_id"]
+        seat_num = b["seat_number"]
+        user_id = b["user_id"]
+        trip_name = b["trip_name"] or f"Trip #{trip_id}"
+
+        # 1. Update booking status
+        await db.execute(
+            text("UPDATE bookings SET status = 'cancelled', payment_status = 'unpaid' WHERE id = :id;"),
+            {"id": b_id}
+        )
+
+        # 2. Mark any initiated payments as failed/expired
+        await db.execute(
+            text("""
+                UPDATE payments
+                SET status = 'failed',
+                    provider_payload = jsonb_build_object('reason', 'reservation_timeout_expired')
+                WHERE booking_id = :bid AND status = 'initiated';
+            """),
+            {"bid": b_id}
+        )
+
+        # Commit cancellation so chain recompute reads updated state
+        await db.commit()
+
+        # 3. Recompute chain & notify waitlist for freed corridor gap
+        stop_names = await trip_stop_names(db, trip_id)
+        chain = await recompute_chain(db, trip_id, seat_num)
+        await notify_chain_change(db, manager, trip_id, seat_num, chain, stop_names)
+
+        # 4. Broadcast live seat_freed / booking_cancelled event to all viewers on this trip
+        await manager.broadcast_trip(trip_id, {
+            "event": "booking_cancelled",
+            "trip_id": trip_id,
+            "seat_number": seat_num,
+            "booking_id": b_id,
+            "reason": "expired_timeout",
+        })
+
+        # 5. Push user in-app notification
+        if user_id:
+            await create_notification(
+                db,
+                user_id,
+                "booking_expired",
+                "Reservation Expired",
+                f"Your 5-minute reservation for Seat #{seat_num} on {trip_name} expired before payment. The seat has been released.",
+                {"trip_id": trip_id, "seat_number": seat_num, "booking_id": b_id},
+            )
+            await db.commit()
+
+        swept_ids.append(b_id)
+        logger.info(f"[CRON] Swept expired booking #{b_id} (Trip #{trip_id}, Seat #{seat_num})")
+
+    return {
+        "swept_count": len(swept_ids),
+        "swept_booking_ids": swept_ids,
+    }
+
+
+async def sweep_expired_waitlist_windows(db: AsyncSession, max_age_minutes: int = 5) -> Dict[str, Any]:
+    """
+    Sweeps seat_interests where the user was notified of an open seat, but did not claim
+    it within max_age_minutes. Marks as 'expired' and offers the gap to the next waitlisted passenger.
+    """
+    query = text(f"""
+        SELECT si.id, si.user_id, si.trip_id, si.board_stop_order, si.alight_stop_order,
+               si.seat_number, si.notified_at
+        FROM seat_interests si
+        WHERE si.status = 'notified'
+          AND si.notified_at IS NOT NULL
+          AND si.notified_at < (NOW() - INTERVAL '{max_age_minutes} minutes')
+        ORDER BY si.id ASC;
+    """)
+    result = await db.execute(query)
+    expired_interests = [dict(r) for r in result.mappings().all()]
+
+    expired_ids: List[int] = []
+
+    for item in expired_interests:
+        i_id = item["id"]
+        trip_id = item["trip_id"]
+        seat_num = item["seat_number"]
+        user_id = item["user_id"]
+
+        # Mark interest as expired
+        await db.execute(
+            text("UPDATE seat_interests SET status = 'expired' WHERE id = :id;"),
+            {"id": i_id}
+        )
+        await db.commit()
+
+        # In-app notification
+        if user_id:
+            await create_notification(
+                db,
+                user_id,
+                "waitlist_window_expired",
+                "Waitlist Window Passed",
+                f"Your 5-minute priority claim window for Trip #{trip_id} has expired and was offered to the next passenger.",
+                {"trip_id": trip_id, "interest_id": i_id},
+            )
+            await db.commit()
+
+        # Re-trigger chain notification for this seat so the next waitlisted person gets notified
+        if seat_num:
+            stop_names = await trip_stop_names(db, trip_id)
+            chain = await recompute_chain(db, trip_id, seat_num)
+            await notify_chain_change(db, manager, trip_id, seat_num, chain, stop_names)
+
+        expired_ids.append(i_id)
+        logger.info(f"[CRON] Expired waitlist window #{i_id} (Trip #{trip_id})")
+
+    return {
+        "expired_count": len(expired_ids),
+        "expired_interest_ids": expired_ids,
+    }
+
+
+async def auto_complete_arrived_trips(db: AsyncSession) -> Dict[str, Any]:
+    """
+    Checks active trips (boarding / in_transit) and marks them 'completed' if the
+    vehicle has reached the final stop of its route.
+    """
+    query = text("""
+        SELECT t.id, t.name, t.status, t.current_stop_order,
+               (SELECT MAX(stop_order) FROM route_stops rs WHERE rs.route_id = t.route_id) AS max_stop_order
+        FROM trips t
+        WHERE t.status IN ('in_transit', 'boarding')
+          AND t.current_stop_order IS NOT NULL;
+    """)
+    result = await db.execute(query)
+    active_trips = [dict(r) for r in result.mappings().all()]
+
+    completed_ids: List[int] = []
+
+    for t in active_trips:
+        max_stop = t["max_stop_order"]
+        current_stop = t["current_stop_order"]
+
+        if max_stop and current_stop >= max_stop:
+            trip_id = t["id"]
+            await db.execute(
+                text("UPDATE trips SET status = 'completed' WHERE id = :id;"),
+                {"id": trip_id}
+            )
+            await db.commit()
+
+            # Broadcast trip completion to WebSocket listeners
+            await manager.broadcast_trip(trip_id, {
+                "event": "trip_completed",
+                "trip_id": trip_id,
+                "status": "completed",
+                "message": f"Trip #{trip_id} reached final stop ({current_stop}/{max_stop}) and is now completed."
+            })
+            completed_ids.append(trip_id)
+            logger.info(f"[CRON] Auto-completed Trip #{trip_id} at final stop {current_stop}/{max_stop}")
+
+    return {
+        "completed_count": len(completed_ids),
+        "completed_trip_ids": completed_ids,
+    }
+
+
+async def sweep_upcoming_departure_reminders(db: AsyncSession, window_minutes: int = 30) -> Dict[str, Any]:
+    """
+    Sends automated departure reminder (SMS & WhatsApp) to confirmed passengers
+    whose trip departs within window_minutes and haven't yet received a reminder.
+    """
+    query = text(f"""
+        SELECT b.id AS booking_id, b.trip_id, b.user_id, u.phone AS passenger_phone
+        FROM bookings b
+        JOIN trips t ON t.id = b.trip_id
+        JOIN users u ON u.id = b.user_id
+        WHERE b.status = 'confirmed'
+          AND t.status IN ('scheduled', 'boarding')
+          AND t.scheduled_at IS NOT NULL
+          AND t.scheduled_at > NOW()
+          AND t.scheduled_at <= (NOW() + INTERVAL '{window_minutes} minutes')
+          AND NOT EXISTS (
+              SELECT 1 FROM dispatches d
+              WHERE d.booking_id = b.id
+                AND d.message_body LIKE '%DEPARTURE REMINDER%'
+          )
+        LIMIT 20;
+    """)
+    result = await db.execute(query)
+    candidates = [dict(r) for r in result.mappings().all()]
+
+    reminded_ids: List[int] = []
+
+    for c in candidates:
+        b_id = c["booking_id"]
+        # Trigger dispatch through dispatch module
+        res = await dispatch.dispatch_booking_confirmation(
+            db,
+            booking_id=b_id,
+            channels=["sms", "whatsapp"],
+            override_phone=c.get("passenger_phone"),
+        )
+        if res.get("status") == "dispatched":
+            reminded_ids.append(b_id)
+            logger.info(f"[CRON] Dispatched departure reminder for Booking #{b_id}")
+
+    return {
+        "reminded_count": len(reminded_ids),
+        "reminded_booking_ids": reminded_ids,
+    }
+
+
+async def run_all_crons(db: AsyncSession) -> Dict[str, Any]:
+    """
+    Executes a single pass of all automated background sweeps.
+    Used by both the periodic worker and the manual admin trigger endpoint.
+    """
+    global CRON_STATS
+
+    results = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pending_sweeper": await sweep_expired_pending_bookings(db),
+        "waitlist_sweeper": await sweep_expired_waitlist_windows(db),
+        "trip_completer": await auto_complete_arrived_trips(db),
+        "departure_reminders": await sweep_upcoming_departure_reminders(db),
+    }
+
+    CRON_STATS["last_run"] = results["timestamp"]
+    CRON_STATS["runs_count"] += 1
+    CRON_STATS["total_swept_bookings"] += results["pending_sweeper"]["swept_count"]
+    CRON_STATS["total_expired_waitlists"] += results["waitlist_sweeper"]["expired_count"]
+    CRON_STATS["total_completed_trips"] += results["trip_completer"]["completed_count"]
+    CRON_STATS["total_reminders_dispatched"] += results["departure_reminders"]["reminded_count"]
+    CRON_STATS["last_results"] = results
+    CRON_STATS["last_error"] = None
+
+    return results
+
+
+async def cron_worker_loop(interval_seconds: int = 60):
+    """
+    Continuous background loop that wakes up every interval_seconds.
+    Safe against uncaught exceptions to ensure the worker never crashes.
+    """
+    global CRON_STATS
+    CRON_STATS["worker_running"] = True
+    logger.info(f"[CRON] Worker started with {interval_seconds}s interval.")
+
+    while True:
+        try:
+            async with AsyncSessionLocal() as session:
+                await run_all_crons(session)
+        except asyncio.CancelledError:
+            logger.info("[CRON] Worker received shutdown cancellation.")
+            CRON_STATS["worker_running"] = False
+            break
+        except Exception as exc:
+            logger.error(f"[CRON ERROR] In background sweep: {exc}", exc_info=True)
+            CRON_STATS["last_error"] = str(exc)
+
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            logger.info("[CRON] Worker received shutdown during sleep.")
+            CRON_STATS["worker_running"] = False
+            break
+
+
+def start_cron_worker(interval_seconds: int = 60) -> asyncio.Task:
+    """Spawns the background asyncio cron task if not already running."""
+    global _cron_task
+    if _cron_task is None or _cron_task.done():
+        _cron_task = asyncio.create_task(cron_worker_loop(interval_seconds=interval_seconds))
+    return _cron_task
+
+
+def stop_cron_worker():
+    """Gracefully cancels the background worker task."""
+    global _cron_task
+    if _cron_task and not _cron_task.done():
+        _cron_task.cancel()
+

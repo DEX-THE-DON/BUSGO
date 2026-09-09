@@ -82,6 +82,23 @@ async def get_current_user(
     return user
 
 
+async def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    db: AsyncSession = Depends(get_async_db),
+) -> Optional[User]:
+    if credentials is None:
+        return None
+    try:
+        payload = decode_access_token(credentials.credentials)
+        user_id = payload.get("sub")
+        if user_id is None:
+            return None
+        user = (await db.execute(select(User).where(User.id == int(user_id)))).scalars().first()
+        return user
+    except Exception:
+        return None
+
+
 def require_roles(*roles: str):
     """FastAPI dependency factory: restrict an endpoint to specific user roles."""
 

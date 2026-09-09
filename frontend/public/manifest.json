@@ -1,0 +1,63 @@
+{
+  "name": "BUSGO — Kenya Transit Operations",
+  "short_name": "BUSGO",
+  "description": "Next-gen Kenyan bus transit, matatu ticketing, live corridor GPS, and offline driver manifest operations.",
+  "start_url": "/",
+  "id": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#090c15",
+  "theme_color": "#06b6d4",
+  "categories": ["travel", "transportation", "utilities"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Stage Dispatcher POS",
+      "short_name": "Stage POS",
+      "description": "Walk-in cash booking & Mshiko wa Stage reconciliation",
+      "url": "/dispatcher",
+      "icons": [{ "src": "/icons/icon-192.svg", "sizes": "192x192" }]
+    },
+    {
+      "name": "Driver Console",
+      "short_name": "Driver",
+      "description": "Open Driver & Conductor Dispatch Console",
+      "url": "/driver",
+      "icons": [{ "src": "/icons/icon-192.svg", "sizes": "192x192" }]
+    },
+    {
+      "name": "Nganya Onboard Portal",
+      "short_name": "Nganya",
+      "description": "Cruising HUD Speedometer, Soundboard & Stop Bell",
+      "url": "/onboard",
+      "icons": [{ "src": "/icons/icon-192.svg", "sizes": "192x192" }]
+    },
+    {
+      "name": "Passenger Portal",
+      "short_name": "Tickets",
+      "description": "My Booked Tickets & Live Route Map",
+      "url": "/user",
+      "icons": [{ "src": "/icons/icon-192.svg", "sizes": "192x192" }]
+    }
+  ]
+}
+
