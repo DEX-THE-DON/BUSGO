@@ -79,6 +79,14 @@ class Vehicle(Base):
     owner_id = Column(Integer, ForeignKey('users.id'), nullable=True)
     owner_name = Column(String, nullable=True)
     owner_phone = Column(String, nullable=True)
+    # Hardware GPS Tracker Telemetry (Teltonika / Concox)
+    tracker_imei = Column(String, unique=True, nullable=True, index=True)
+    tracker_model = Column(String, nullable=True) # 'teltonika_fmb920', 'concox_gt06', etc.
+    last_ping_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    last_lat = Column(Float, nullable=True)
+    last_lng = Column(Float, nullable=True)
+    last_speed = Column(Float, nullable=True)
+    last_heading = Column(Float, nullable=True)
     created_at = Column(TIMESTAMP(timezone=True))
 
     sacco = relationship('Sacco', back_populates='vehicles')
@@ -88,6 +96,30 @@ class Vehicle(Base):
     trips = relationship('Trip', back_populates='vehicle')
     compliance = relationship('VehicleCompliance', back_populates='vehicle', uselist=False)
     telemetry = relationship('VehicleTelemetry', back_populates='vehicle')
+    gps_logs = relationship('GpsTelemetryLog', back_populates='vehicle')
+
+
+class GpsTelemetryLog(Base):
+    """Historical telematics breadcrumbs ingested from hardware GPS trackers (Teltonika / Concox)."""
+    __tablename__ = 'gps_telemetry_logs'
+
+    id = Column(Integer, primary_key=True, index=True)
+    vehicle_id = Column(Integer, ForeignKey('vehicles.id'), nullable=True, index=True)
+    imei = Column(String, nullable=False, index=True)
+    protocol = Column(String, nullable=False) # 'teltonika' | 'concox' | 'generic'
+    lat = Column(Float, nullable=False)
+    lng = Column(Float, nullable=False)
+    speed = Column(Float, nullable=False, default=0.0)
+    heading = Column(Float, nullable=False, default=0.0)
+    altitude = Column(Float, nullable=True, default=0.0)
+    satellites = Column(Integer, nullable=True, default=0)
+    ignition_on = Column(Boolean, nullable=False, default=True)
+    overspeed_flag = Column(Boolean, nullable=False, default=False)
+    raw_payload_hex = Column(Text, nullable=True)
+    recorded_at = Column(TIMESTAMP(timezone=True), nullable=False, index=True)
+    created_at = Column(TIMESTAMP(timezone=True), default=func.now())
+
+    vehicle = relationship('Vehicle', back_populates='gps_logs')
 
 
 class VehicleCompliance(Base):

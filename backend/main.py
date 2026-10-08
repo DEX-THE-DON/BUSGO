@@ -40,6 +40,14 @@ from backend import paystack
 from backend import dispatch
 from backend import crons
 from backend import reconciliation
+from backend import telemetry_listener
+from backend.telemetry_listener import (
+    HardwareTelemetryTCPServer,
+    process_telemetry_point,
+    parse_teltonika_codec8,
+    parse_concox_gt06,
+    NTSA_SPEED_LIMIT_KMH,
+)
 from backend.locks import seat_lock_manager
 from backend.models import (
     Base,
@@ -63,6 +71,7 @@ from backend.models import (
     Incident,
     SaccoSettlement,
     VehicleTelemetry,
+    GpsTelemetryLog,
     ChargingStation,
     GroupBooking,
     GroupBookingMember,
@@ -415,6 +424,39 @@ async def initialize_database() -> None:
             );
         """))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_vehicle_telemetry_vehicle_id ON vehicle_telemetry (vehicle_id);"))
+
+        # Hardware GPS Trackers (Teltonika Codec 8 / Concox GT06) Telematics
+        await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS tracker_imei VARCHAR(30);"))
+        await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_vehicles_tracker_imei ON vehicles (tracker_imei);"))
+        await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS tracker_model VARCHAR(50);"))
+        await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS last_ping_at TIMESTAMP WITH TIME ZONE;"))
+        await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS last_lat DOUBLE PRECISION;"))
+        await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS last_lng DOUBLE PRECISION;"))
+        await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS last_speed DOUBLE PRECISION;"))
+        await conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS last_heading DOUBLE PRECISION;"))
+
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS gps_telemetry_logs (
+                id SERIAL PRIMARY KEY,
+                vehicle_id INTEGER REFERENCES vehicles(id),
+                imei VARCHAR(30) NOT NULL,
+                protocol VARCHAR(20) NOT NULL,
+                lat DOUBLE PRECISION NOT NULL,
+                lng DOUBLE PRECISION NOT NULL,
+                speed DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                heading DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                altitude DOUBLE PRECISION DEFAULT 0.0,
+                satellites INTEGER DEFAULT 0,
+                ignition_on BOOLEAN DEFAULT TRUE,
+                overspeed_flag BOOLEAN DEFAULT FALSE,
+                raw_payload_hex TEXT,
+                recorded_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+        """))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_gps_logs_vehicle_id ON gps_telemetry_logs (vehicle_id);"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_gps_logs_imei ON gps_telemetry_logs (imei);"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_gps_logs_recorded_at ON gps_telemetry_logs (recorded_at);"))
 
         # Kenyan Highway EV Fast Charging Stations (Option 4)
         await conn.execute(text("""
@@ -943,15 +985,26 @@ async def initialize_database() -> None:
         await session.commit()
 
 
+global_telemetry_tcp_server: Optional[HardwareTelemetryTCPServer] = None
+
 @app.on_event("startup")
 async def on_startup():
+    global global_telemetry_tcp_server
     await initialize_database()
     crons.start_cron_worker(interval_seconds=60)
+    try:
+        global_telemetry_tcp_server = HardwareTelemetryTCPServer(AsyncSessionLocal, ws_manager=manager)
+        asyncio.create_task(global_telemetry_tcp_server.start(host="0.0.0.0", teltonika_port=5027, concox_port=5023))
+    except Exception as tcp_err:
+        logger.warning(f"Failed to start Hardware Telemetry TCP Listener: {tcp_err}")
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    global global_telemetry_tcp_server
     crons.stop_cron_worker()
+    if global_telemetry_tcp_server:
+        await global_telemetry_tcp_server.stop()
 
 
 @app.get("/")
@@ -6849,6 +6902,256 @@ async def get_radar_fleet(corridor: Optional[str] = None, db: AsyncSession = Dep
         fleet.append(item)
 
     return {"fleet": fleet, "count": len(fleet), "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+# ---------------------------------------------------------------------------
+# Hardware GPS Tracker Telemetry Ingestion (Teltonika / Concox GT06)
+# ---------------------------------------------------------------------------
+
+class GenericTelemetryIngestRequest(BaseModel):
+    imei: Optional[str] = None
+    plate_number: Optional[str] = None
+    lat: float
+    lng: float
+    speed: float = 0.0
+    heading: float = 0.0
+    altitude: float = 0.0
+    satellites: int = 0
+    ignition: bool = True
+    protocol: str = "generic"
+    recorded_at: Optional[str] = None
+
+
+class RawHexIngestRequest(BaseModel):
+    imei: Optional[str] = None
+    hex_data: str
+
+
+class BindTrackerRequest(BaseModel):
+    vehicle_id: Optional[int] = None
+    plate_number: Optional[str] = None
+    tracker_imei: str
+    tracker_model: Optional[str] = "teltonika_fmb920"
+
+
+@app.post("/api/telemetry/ingest/teltonika")
+async def ingest_teltonika_telemetry(payload: RawHexIngestRequest, db: AsyncSession = Depends(get_async_db)):
+    """Webhook / Gateway endpoint: Ingest Teltonika Codec 8 binary frame (encoded in hex)."""
+    try:
+        data_bytes = bytes.fromhex(payload.hex_data.strip())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid hex_data payload format.")
+
+    try:
+        records, ack = parse_teltonika_codec8(data_bytes, imei=payload.imei)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Teltonika decode error: {e}")
+
+    processed = []
+    for r in records:
+        if r.get("type") == "avl_data":
+            r["raw_hex"] = payload.hex_data[:256]
+            res = await process_telemetry_point(db, r, manager)
+            processed.append(res)
+
+    return {
+        "status": "success",
+        "records_count": len(processed),
+        "ack_hex": ack.hex(),
+        "processed": processed,
+    }
+
+
+@app.post("/api/telemetry/ingest/concox")
+async def ingest_concox_telemetry(payload: RawHexIngestRequest, db: AsyncSession = Depends(get_async_db)):
+    """Webhook / Gateway endpoint: Ingest Concox GT06 frame (encoded in hex)."""
+    try:
+        data_bytes = bytes.fromhex(payload.hex_data.strip())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid hex_data payload format.")
+
+    try:
+        info, ack = parse_concox_gt06(data_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Concox decode error: {e}")
+
+    res = None
+    if info.get("type") == "avl_data":
+        if payload.imei:
+            info["imei"] = payload.imei
+        info["raw_hex"] = payload.hex_data[:256]
+        res = await process_telemetry_point(db, info, manager)
+
+    return {
+        "status": "success",
+        "packet_type": info.get("type"),
+        "ack_hex": ack.hex() if ack else None,
+        "result": res,
+        "parsed": info,
+    }
+
+
+@app.post("/api/telemetry/ingest/generic")
+async def ingest_generic_telemetry(payload: GenericTelemetryIngestRequest, db: AsyncSession = Depends(get_async_db)):
+    """REST endpoint: Ingest normalized GPS coordinate point from any device, gateway, or driver mobile client."""
+    rec_dt = None
+    if payload.recorded_at:
+        try:
+            rec_dt = datetime.fromisoformat(payload.recorded_at.replace("Z", "+00:00"))
+        except Exception:
+            pass
+
+    point = {
+        "imei": payload.imei,
+        "plate_number": payload.plate_number,
+        "lat": payload.lat,
+        "lng": payload.lng,
+        "speed": payload.speed,
+        "heading": payload.heading,
+        "altitude": payload.altitude,
+        "satellites": payload.satellites,
+        "ignition": payload.ignition,
+        "protocol": payload.protocol,
+        "recorded_at": rec_dt,
+    }
+    res = await process_telemetry_point(db, point, manager)
+    return res
+
+
+@app.get("/api/telemetry/trackers")
+async def list_registered_trackers(db: AsyncSession = Depends(get_async_db), current_user: User = Depends(get_current_user)):
+    """Admin/Sacco: List physical hardware GPS trackers bound to fleet vehicles with online status."""
+    now = datetime.now(timezone.utc)
+    rows = (await db.execute(text("""
+        SELECT v.id AS vehicle_id, v.plate_number, v.tracker_imei, v.tracker_model,
+               v.last_ping_at, v.last_lat, v.last_lng, v.last_speed, v.last_heading,
+               s.name AS sacco_name,
+               (SELECT t.id FROM trips t WHERE t.vehicle_id = v.id AND t.status IN ('in_transit', 'boarding', 'scheduled') ORDER BY t.id DESC LIMIT 1) AS active_trip_id,
+               (SELECT t.name FROM trips t WHERE t.vehicle_id = v.id AND t.status IN ('in_transit', 'boarding', 'scheduled') ORDER BY t.id DESC LIMIT 1) AS active_trip_name
+        FROM vehicles v
+        LEFT JOIN saccos s ON s.id = v.sacco_id
+        WHERE v.tracker_imei IS NOT NULL
+        ORDER BY v.last_ping_at DESC NULLS LAST, v.id ASC;
+    """))).mappings().all()
+
+    trackers = []
+    for r in rows:
+        last_ping = r["last_ping_at"]
+        if isinstance(last_ping, str) and last_ping:
+            try:
+                last_ping = datetime.fromisoformat(last_ping.replace("Z", "+00:00"))
+            except Exception:
+                pass
+        if last_ping and hasattr(last_ping, "tzinfo") and last_ping.tzinfo is None:
+            last_ping = last_ping.replace(tzinfo=timezone.utc)
+
+        is_online = bool(last_ping and (now - last_ping).total_seconds() <= 600)  # 10 min threshold
+
+        trackers.append({
+            "vehicle_id": r["vehicle_id"],
+            "plate_number": r["plate_number"],
+            "tracker_imei": r["tracker_imei"],
+            "tracker_model": r["tracker_model"] or "teltonika_fmb920",
+            "sacco_name": r["sacco_name"],
+            "is_online": is_online,
+            "last_ping_at": last_ping.isoformat() if hasattr(last_ping, "isoformat") else str(last_ping or ""),
+            "last_lat": r["last_lat"],
+            "last_lng": r["last_lng"],
+            "last_speed": r["last_speed"],
+            "last_heading": r["last_heading"],
+            "active_trip_id": r["active_trip_id"],
+            "active_trip_name": r["active_trip_name"],
+        })
+
+    return {"trackers": trackers, "total_trackers": len(trackers)}
+
+
+@app.post("/api/telemetry/trackers/bind")
+async def bind_tracker_to_vehicle(payload: BindTrackerRequest, db: AsyncSession = Depends(get_async_db), current_user: User = Depends(require_roles('admin', 'sacco_admin'))):
+    """Admin/Sacco Admin: Bind a physical tracker IMEI to a fleet vehicle."""
+    if not payload.tracker_imei:
+        raise HTTPException(status_code=400, detail="tracker_imei is required.")
+
+    veh = None
+    if payload.vehicle_id:
+        veh = (await db.execute(text("SELECT id, plate_number FROM vehicles WHERE id = :vid;"), {"vid": payload.vehicle_id})).mappings().first()
+    elif payload.plate_number:
+        veh = (await db.execute(text("SELECT id, plate_number FROM vehicles WHERE plate_number = :plate;"), {"plate": payload.plate_number.upper().strip()})).mappings().first()
+
+    if not veh:
+        raise HTTPException(status_code=404, detail="Vehicle not found.")
+
+    existing = (await db.execute(text("SELECT id, plate_number FROM vehicles WHERE tracker_imei = :imei AND id != :vid;"), {"imei": payload.tracker_imei.strip(), "vid": veh["id"]})).mappings().first()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Tracker IMEI {payload.tracker_imei} is already registered to vehicle {existing['plate_number']}.")
+
+    await db.execute(
+        text("""
+            UPDATE vehicles
+            SET tracker_imei = :imei,
+                tracker_model = :model
+            WHERE id = :vid;
+        """),
+        {"imei": payload.tracker_imei.strip(), "model": payload.tracker_model or "teltonika_fmb920", "vid": veh["id"]}
+    )
+    await db.commit()
+
+    return {
+        "ok": True,
+        "message": f"Tracker {payload.tracker_imei} ({payload.tracker_model}) bound to vehicle {veh['plate_number']}.",
+        "vehicle_id": veh["id"],
+        "plate_number": veh["plate_number"],
+    }
+
+
+@app.get("/api/telemetry/trackers/{imei}/history")
+async def get_tracker_history(imei: str, limit: int = 100, db: AsyncSession = Depends(get_async_db), current_user: User = Depends(get_current_user)):
+    """Returns recent historical GPS breadcrumbs for route trace and corridor audit."""
+    rows = (await db.execute(text("""
+        SELECT id, lat, lng, speed, heading, altitude, satellites,
+               ignition_on, overspeed_flag, recorded_at
+        FROM gps_telemetry_logs
+        WHERE imei = :imei
+        ORDER BY recorded_at DESC
+        LIMIT :lim;
+    """), {"imei": imei, "lim": limit})).mappings().all()
+
+    trail = [dict(r) for r in reversed(rows)]
+    for pt in trail:
+        if hasattr(pt.get("recorded_at"), "isoformat"):
+            pt["recorded_at"] = pt["recorded_at"].isoformat()
+        elif pt.get("recorded_at"):
+            pt["recorded_at"] = str(pt["recorded_at"])
+
+    return {"imei": imei, "points_count": len(trail), "breadcrumbs": trail}
+
+
+@app.get("/api/telemetry/overspeed-alerts")
+async def get_overspeed_alerts(limit: int = 50, db: AsyncSession = Depends(get_async_db), current_user: User = Depends(get_current_user)):
+    """Audit log of NTSA overspeed violations (> 80 km/h) recorded across the fleet."""
+    rows = (await db.execute(text("""
+        SELECT l.id, l.imei, l.lat, l.lng, l.speed, l.heading, l.recorded_at,
+               v.plate_number, s.name AS sacco_name
+        FROM gps_telemetry_logs l
+        LEFT JOIN vehicles v ON v.id = l.vehicle_id
+        LEFT JOIN saccos s ON s.id = v.sacco_id
+        WHERE l.overspeed_flag = true
+        ORDER BY l.recorded_at DESC
+        LIMIT :lim;
+    """), {"lim": limit})).mappings().all()
+
+    alerts = []
+    for r in rows:
+        item = dict(r)
+        if hasattr(item.get("recorded_at"), "isoformat"):
+            item["recorded_at"] = item["recorded_at"].isoformat()
+        alerts.append(item)
+
+    return {
+        "overspeed_limit_kmh": NTSA_SPEED_LIMIT_KMH,
+        "alerts": alerts,
+        "total_alerts": len(alerts),
+    }
 
 
 # ---------------------------------------------------------------------------

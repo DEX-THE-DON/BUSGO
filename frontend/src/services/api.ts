@@ -117,6 +117,15 @@ import type {
   CancelToVoucherResponse,
   ComplianceSweeperResult,
   ComplianceSummary,
+  HardwareTrackerDevice,
+  TrackersListResponse,
+  BindTrackerRequest,
+  BindTrackerResponse,
+  TrackerBreadcrumb,
+  TrackerHistoryResponse,
+  OverspeedAlert,
+  OverspeedAlertsResponse,
+  GenericTelemetryIngestRequest,
 } from '@busgo/types';
 
 export type {
@@ -176,6 +185,15 @@ export type {
   RescheduleBookingRequest,
   RescheduleBookingResponse,
   CancelToVoucherResponse,
+  HardwareTrackerDevice,
+  TrackersListResponse,
+  BindTrackerRequest,
+  BindTrackerResponse,
+  TrackerBreadcrumb,
+  TrackerHistoryResponse,
+  OverspeedAlert,
+  OverspeedAlertsResponse,
+  GenericTelemetryIngestRequest,
 };
 
 /** @deprecated Use `TripOption` (same wire shape, shared with the backend). */
@@ -1615,6 +1633,73 @@ export async function fetchDispatchOutbox(
   if (channel) qp.set('channel', channel);
   const queryStr = qp.toString() ? `?${qp.toString()}` : '';
   return apiFetch(`/api/dispatches/outbox${queryStr}`);
+}
+
+// ---------------------------------------------------------------------------
+// 7. Hardware GPS Tracker Telemetry (Teltonika / Concox GT06)
+// ---------------------------------------------------------------------------
+
+export async function fetchHardwareTrackers(): Promise<TrackersListResponse> {
+  return apiFetch<TrackersListResponse>('/api/telemetry/trackers');
+}
+
+export async function bindHardwareTracker(
+  payload: BindTrackerRequest
+): Promise<BindTrackerResponse> {
+  return apiFetch<BindTrackerResponse>('/api/telemetry/trackers/bind', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchTrackerHistory(
+  imei: string,
+  limit: number = 100
+): Promise<TrackerHistoryResponse> {
+  return apiFetch<TrackerHistoryResponse>(
+    `/api/telemetry/trackers/${encodeURIComponent(imei)}/history?limit=${limit}`
+  );
+}
+
+export async function fetchOverspeedAlerts(
+  limit: number = 50
+): Promise<OverspeedAlertsResponse> {
+  return apiFetch<OverspeedAlertsResponse>(
+    `/api/telemetry/overspeed-alerts?limit=${limit}`
+  );
+}
+
+export async function ingestGenericTelemetry(
+  payload: GenericTelemetryIngestRequest
+): Promise<{
+  status: string;
+  vehicle_id?: number;
+  plate_number: string;
+  trip_id?: number;
+  speed_kmh: number;
+  overspeed_warning: boolean;
+  coordinates: { lat: number; lng: number };
+}> {
+  return apiFetch('/api/telemetry/ingest/generic', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function ingestHardwareHexFrame(
+  protocol: 'teltonika' | 'concox',
+  hexData: string,
+  imei?: string
+): Promise<{
+  status: string;
+  records_count?: number;
+  packet_type?: string;
+  ack_hex?: string;
+}> {
+  return apiFetch(`/api/telemetry/ingest/${protocol}`, {
+    method: 'POST',
+    body: JSON.stringify({ hex_data: hexData, imei }),
+  });
 }
 
 

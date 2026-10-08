@@ -61,6 +61,7 @@ import FleetComplianceTable from '@/components/admin/FleetComplianceTable';
 import IncidentDispatcher from '@/components/admin/IncidentDispatcher';
 import SaccoSettlementManager from '@/components/admin/SaccoSettlementManager';
 import EvFleetDashboard from '@/components/admin/EvFleetDashboard';
+import HardwareTrackersManager from '@/components/admin/HardwareTrackersManager';
 import dynamic from 'next/dynamic';
 
 const NationalFleetRadar = dynamic(() => import('@/components/radar/NationalFleetRadar'), {
@@ -72,6 +73,7 @@ type Tab =
   | 'overview'
   | 'radar'
   | 'vehicles'
+  | 'hardware_gps'
   | 'ev_fleet'
   | 'routes'
   | 'trips'
@@ -350,6 +352,7 @@ export default function AdminDashboard() {
       items: [
         { id: 'overview', label: 'Dashboard', icon: <IconDashboard /> },
         { id: 'radar', label: 'Highway Radar GIS', icon: <span className="text-base">📡</span> },
+        { id: 'hardware_gps', label: 'Hardware Trackers (GPS)', icon: <span className="text-base">🛰️</span> },
         { id: 'analytics', label: 'Analytics', icon: <IconAnalytics /> },
         { id: 'vehicles', label: 'Fleet & Vehicles', icon: <IconFleet />, badge: vehicles.length },
         { id: 'ev_fleet', label: 'Green Fleet & EV', icon: <span className="text-base">⚡</span> },
@@ -580,6 +583,10 @@ export default function AdminDashboard() {
             )}
 
             {tab === 'radar' && <NationalFleetRadar />}
+
+            {tab === 'hardware_gps' && (
+              <HardwareTrackersManager vehicles={vehicles} onRefreshVehicles={loadAll} />
+            )}
 
             {tab === 'ev_fleet' && <EvFleetDashboard />}
 

@@ -529,6 +529,10 @@ export const VehicleSchema = z.object({
   active_trip_name: z.string().nullish().optional(),
   sacco_id: z.number().nullish().optional(),
   sacco_name: z.string().nullish().optional(),
+  tracker_imei: z.string().nullish().optional(),
+  tracker_model: z.string().nullish().optional(),
+  owner_name: z.string().nullish().optional(),
+  owner_phone: z.string().nullish().optional(),
   is_grounded: z.boolean().optional(),
   compliance_status: z.enum(['compliant', 'warning_expiring', 'grounded']).optional(),
 });
@@ -1184,6 +1188,105 @@ export const CancelToVoucherResponseSchema = z.object({
   voucher: TravelVoucherSchema,
 });
 export type CancelToVoucherResponse = z.infer<typeof CancelToVoucherResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Hardware GPS Tracker Telemetry (Teltonika / Concox) Schemas
+// ---------------------------------------------------------------------------
+
+export const HardwareTrackerDeviceSchema = z.object({
+  vehicle_id: z.number(),
+  plate_number: z.string(),
+  tracker_imei: z.string(),
+  tracker_model: z.string(),
+  sacco_name: z.string().nullable().optional(),
+  is_online: z.boolean(),
+  last_ping_at: z.string().nullable().optional(),
+  last_lat: z.number().nullable().optional(),
+  last_lng: z.number().nullable().optional(),
+  last_speed: z.number().nullable().optional(),
+  last_heading: z.number().nullable().optional(),
+  active_trip_id: z.number().nullable().optional(),
+  active_trip_name: z.string().nullable().optional(),
+});
+export type HardwareTrackerDevice = z.infer<typeof HardwareTrackerDeviceSchema>;
+
+export const TrackersListResponseSchema = z.object({
+  trackers: z.array(HardwareTrackerDeviceSchema),
+  total_trackers: z.number(),
+});
+export type TrackersListResponse = z.infer<typeof TrackersListResponseSchema>;
+
+export const BindTrackerRequestSchema = z.object({
+  vehicle_id: z.number().optional(),
+  plate_number: z.string().optional(),
+  tracker_imei: z.string(),
+  tracker_model: z.string().optional(),
+});
+export type BindTrackerRequest = z.infer<typeof BindTrackerRequestSchema>;
+
+export const BindTrackerResponseSchema = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+  vehicle_id: z.number().optional(),
+  plate_number: z.string().optional(),
+});
+export type BindTrackerResponse = z.infer<typeof BindTrackerResponseSchema>;
+
+export const TrackerBreadcrumbSchema = z.object({
+  id: z.number().optional(),
+  lat: z.number(),
+  lng: z.number(),
+  speed: z.number(),
+  heading: z.number(),
+  altitude: z.number().nullable().optional(),
+  satellites: z.number().nullable().optional(),
+  ignition_on: z.boolean().optional(),
+  overspeed_flag: z.boolean().optional(),
+  recorded_at: z.string(),
+});
+export type TrackerBreadcrumb = z.infer<typeof TrackerBreadcrumbSchema>;
+
+export const TrackerHistoryResponseSchema = z.object({
+  imei: z.string(),
+  points_count: z.number(),
+  breadcrumbs: z.array(TrackerBreadcrumbSchema),
+});
+export type TrackerHistoryResponse = z.infer<typeof TrackerHistoryResponseSchema>;
+
+export const OverspeedAlertSchema = z.object({
+  id: z.number(),
+  imei: z.string(),
+  lat: z.number(),
+  lng: z.number(),
+  speed: z.number(),
+  heading: z.number(),
+  recorded_at: z.string(),
+  plate_number: z.string().nullable().optional(),
+  sacco_name: z.string().nullable().optional(),
+});
+export type OverspeedAlert = z.infer<typeof OverspeedAlertSchema>;
+
+export const OverspeedAlertsResponseSchema = z.object({
+  overspeed_limit_kmh: z.number(),
+  alerts: z.array(OverspeedAlertSchema),
+  total_alerts: z.number(),
+});
+export type OverspeedAlertsResponse = z.infer<typeof OverspeedAlertsResponseSchema>;
+
+export const GenericTelemetryIngestRequestSchema = z.object({
+  imei: z.string().optional(),
+  plate_number: z.string().optional(),
+  lat: z.number(),
+  lng: z.number(),
+  speed: z.number().optional(),
+  heading: z.number().optional(),
+  altitude: z.number().optional(),
+  satellites: z.number().optional(),
+  ignition: z.boolean().optional(),
+  protocol: z.string().optional(),
+  recorded_at: z.string().optional(),
+});
+export type GenericTelemetryIngestRequest = z.infer<typeof GenericTelemetryIngestRequestSchema>;
 
 
 
