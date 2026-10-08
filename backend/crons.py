@@ -13,7 +13,7 @@ This module handles:
 """
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 
 from sqlalchemy import text
@@ -309,6 +309,232 @@ async def sweep_upcoming_departure_reminders(db: AsyncSession, window_minutes: i
     }
 
 
+async def sweep_ntsa_compliance_and_auto_ground(db: AsyncSession) -> Dict[str, Any]:
+    """
+    Automated NTSA Compliance & Auto-Grounding Sweeper.
+    Scans all fleet vehicles and assigned drivers for:
+    1. Expired Speed Governor Calibration
+    2. Expired NTSA Annual Inspection Sticker
+    3. Expired PSV Commercial Insurance Policy
+    4. Expired Driver PSV Badge
+    If non-compliant:
+      - Automatically sets is_grounded = True and details exact grounded_reason.
+      - Auto-suspends scheduled/boarding trips assigned to this vehicle.
+      - Dispatches instant SMS alerts to Vehicle Owner and Sacco Management.
+    If compliant:
+      - Automatically restores previously auto-grounded vehicles to active service.
+    """
+    now = datetime.now(timezone.utc)
+    now_plus_30 = now + timedelta(days=30)
+
+    query = text("""
+        SELECT v.id AS vehicle_id, v.plate_number, v.sacco_id, v.driver_id,
+               v.owner_id, v.owner_name, v.owner_phone,
+               s.name AS sacco_name, s.contact_phone AS sacco_phone,
+               vc.id AS compliance_id,
+               vc.speed_governor_vendor, vc.speed_governor_cert, vc.speed_governor_expiry,
+               vc.ntsa_inspection_cert, vc.ntsa_inspection_expiry,
+               vc.insurance_underwriter, vc.insurance_policy_no, vc.insurance_expiry,
+               COALESCE(vc.is_grounded, false) AS is_grounded,
+               vc.grounded_reason,
+               u.full_name AS driver_name, u.phone AS driver_phone,
+               u.psv_badge_number, u.psv_badge_expiry
+        FROM vehicles v
+        LEFT JOIN vehicle_compliance vc ON vc.vehicle_id = v.id
+        LEFT JOIN saccos s ON s.id = v.sacco_id
+        LEFT JOIN users u ON u.id = v.driver_id
+        ORDER BY v.id ASC;
+    """)
+    rows = (await db.execute(query)).mappings().all()
+
+    newly_grounded = []
+    cleared = []
+    warnings = []
+    total_suspended_trips = 0
+
+    def to_utc(val):
+        if val is None:
+            return None
+        if isinstance(val, str):
+            try:
+                val = datetime.fromisoformat(val.replace("Z", "+00:00"))
+            except Exception:
+                return None
+        if hasattr(val, "tzinfo") and val.tzinfo is None:
+            val = val.replace(tzinfo=timezone.utc)
+        return val
+
+    for row in rows:
+        vid = row["vehicle_id"]
+        plate = row["plate_number"]
+        violations = []
+        item_warnings = []
+
+        gov_exp = to_utc(row["speed_governor_expiry"])
+        ntsa_exp = to_utc(row["ntsa_inspection_expiry"])
+        ins_exp = to_utc(row["insurance_expiry"])
+        psv_exp = to_utc(row["psv_badge_expiry"])
+
+        # 1. Speed Governor Check
+        if not gov_exp:
+            violations.append("Missing Speed Governor Calibration")
+        elif gov_exp < now:
+            days_ago = max(1, (now - gov_exp).days)
+            violations.append(f"Expired Speed Governor ({days_ago}d overdue)")
+        elif gov_exp < now_plus_30:
+            days_left = max(0, (gov_exp - now).days)
+            item_warnings.append(f"Speed Governor expires in {days_left}d")
+
+        # 2. NTSA Inspection Sticker Check
+        if not ntsa_exp:
+            violations.append("Missing NTSA Inspection Certificate")
+        elif ntsa_exp < now:
+            days_ago = max(1, (now - ntsa_exp).days)
+            violations.append(f"Expired NTSA Annual Inspection ({days_ago}d overdue)")
+        elif ntsa_exp < now_plus_30:
+            days_left = max(0, (ntsa_exp - now).days)
+            item_warnings.append(f"NTSA Inspection expires in {days_left}d")
+
+        # 3. PSV Insurance Policy Check
+        if not ins_exp:
+            violations.append("Missing PSV Insurance Policy")
+        elif ins_exp < now:
+            days_ago = max(1, (now - ins_exp).days)
+            violations.append(f"Expired PSV Insurance ({days_ago}d overdue)")
+        elif ins_exp < now_plus_30:
+            days_left = max(0, (ins_exp - now).days)
+            item_warnings.append(f"PSV Insurance expires in {days_left}d")
+
+        # 4. Assigned Driver PSV Badge Check
+        if row["driver_id"]:
+            if not psv_exp:
+                violations.append(f"Assigned Driver {row['driver_name'] or 'PSV Driver'} lacks PSV Badge")
+            elif psv_exp < now:
+                days_ago = max(1, (now - psv_exp).days)
+                violations.append(f"Driver {row['driver_name'] or 'PSV Driver'} PSV Badge Expired ({days_ago}d overdue)")
+            elif psv_exp < now_plus_30:
+                days_left = max(0, (psv_exp - now).days)
+                item_warnings.append(f"Driver PSV Badge expires in {days_left}d")
+
+        if item_warnings:
+            warnings.append({"plate": plate, "vehicle_id": vid, "warnings": item_warnings})
+
+        # Violation detected => AUTO-GROUND
+        if violations:
+            reason_text = "NTSA AUTO-GROUNDED: " + "; ".join(violations)
+            is_new_grounding = not row["is_grounded"]
+
+            if row["compliance_id"]:
+                await db.execute(
+                    text("""
+                        UPDATE vehicle_compliance
+                        SET is_grounded = true, grounded_reason = :reason, updated_at = :now
+                        WHERE vehicle_id = :vid;
+                    """),
+                    {"reason": reason_text, "now": now, "vid": vid}
+                )
+            else:
+                await db.execute(
+                    text("""
+                        INSERT INTO vehicle_compliance (vehicle_id, is_grounded, grounded_reason, updated_at)
+                        VALUES (:vid, true, :reason, :now);
+                    """),
+                    {"vid": vid, "reason": reason_text, "now": now}
+                )
+
+            # Auto-suspend upcoming trips assigned to this vehicle
+            t_res = await db.execute(
+                text("""
+                    UPDATE trips
+                    SET status = 'grounded'
+                    WHERE vehicle_id = :vid AND status IN ('scheduled', 'boarding')
+                    RETURNING id, name;
+                """),
+                {"vid": vid}
+            )
+            suspended_trips = t_res.mappings().all()
+            total_suspended_trips += len(suspended_trips)
+
+            if is_new_grounding:
+                newly_grounded.append({
+                    "vehicle_id": vid,
+                    "plate_number": plate,
+                    "sacco_name": row["sacco_name"],
+                    "reason": reason_text,
+                    "suspended_trips": [dict(t) for t in suspended_trips],
+                })
+                logger.warning(f"[NTSA SWEEPER] Auto-grounded vehicle {plate}: {reason_text}")
+
+                try:
+                    await manager.broadcast({
+                        "event": "vehicle_grounded",
+                        "vehicle_id": vid,
+                        "plate_number": plate,
+                        "reason": reason_text,
+                        "suspended_trips_count": len(suspended_trips),
+                    })
+                except Exception as b_err:
+                    logger.warning(f"Failed to broadcast grounding WS: {b_err}")
+
+                sms_targets = set(filter(None, [row["owner_phone"], row["sacco_phone"]]))
+                alert_msg = (
+                    f"BUSGO NTSA ALERT: Vehicle {plate} has been AUTO-GROUNDED. "
+                    f"Violations: {'; '.join(violations[:2])}. "
+                    f"All scheduled trips suspended. Renew certifications to restore."
+                )
+                for ph in sms_targets:
+                    try:
+                        await dispatch.send_sms_gateway(ph, alert_msg)
+                    except Exception as s_err:
+                        logger.warning(f"Failed to send compliance SMS to {ph}: {s_err}")
+
+        else:
+            # Compliant: If previously auto-grounded, restore to service!
+            prev_reason = row["grounded_reason"] or ""
+            if row["is_grounded"] and "NTSA AUTO-GROUNDED:" in prev_reason:
+                await db.execute(
+                    text("""
+                        UPDATE vehicle_compliance
+                        SET is_grounded = false, grounded_reason = NULL, updated_at = :now
+                        WHERE vehicle_id = :vid;
+                    """),
+                    {"now": now, "vid": vid}
+                )
+                cleared.append({"vehicle_id": vid, "plate_number": plate})
+                logger.info(f"[NTSA SWEEPER] Auto-cleared vehicle {plate} for active transit service.")
+
+                try:
+                    await manager.broadcast({
+                        "event": "vehicle_cleared",
+                        "vehicle_id": vid,
+                        "plate_number": plate,
+                    })
+                except Exception:
+                    pass
+
+                sms_targets = set(filter(None, [row["owner_phone"], row["sacco_phone"]]))
+                clear_msg = f"BUSGO NTSA NOTICE: Vehicle {plate} certifications verified compliant. CLEARED for active passenger service."
+                for ph in sms_targets:
+                    try:
+                        await dispatch.send_sms_gateway(ph, clear_msg)
+                    except Exception:
+                        pass
+
+    await db.commit()
+
+    return {
+        "timestamp": now.isoformat(),
+        "total_vehicles_checked": len(rows),
+        "auto_grounded_count": len(newly_grounded),
+        "auto_cleared_count": len(cleared),
+        "suspended_trips_count": total_suspended_trips,
+        "warnings_count": len(warnings),
+        "grounded_vehicles": newly_grounded,
+        "cleared_vehicles": cleared,
+        "warnings": warnings,
+    }
+
+
 async def run_all_crons(db: AsyncSession) -> Dict[str, Any]:
     """
     Executes a single pass of all automated background sweeps.
@@ -336,6 +562,7 @@ async def run_all_crons(db: AsyncSession) -> Dict[str, Any]:
         "waitlist_sweeper": await sweep_expired_waitlist_windows(db),
         "trip_completer": await auto_complete_arrived_trips(db),
         "departure_reminders": await sweep_upcoming_departure_reminders(db),
+        "ntsa_compliance_sweeper": await sweep_ntsa_compliance_and_auto_ground(db),
     }
 
     CRON_STATS["last_run"] = results["timestamp"]
@@ -344,6 +571,8 @@ async def run_all_crons(db: AsyncSession) -> Dict[str, Any]:
     CRON_STATS["total_expired_waitlists"] += results["waitlist_sweeper"]["expired_count"]
     CRON_STATS["total_completed_trips"] += results["trip_completer"]["completed_count"]
     CRON_STATS["total_reminders_dispatched"] += results["departure_reminders"]["reminded_count"]
+    CRON_STATS["total_auto_grounded"] = CRON_STATS.get("total_auto_grounded", 0) + results["ntsa_compliance_sweeper"]["auto_grounded_count"]
+    CRON_STATS["total_auto_cleared"] = CRON_STATS.get("total_auto_cleared", 0) + results["ntsa_compliance_sweeper"]["auto_cleared_count"]
     CRON_STATS["last_results"] = results
     CRON_STATS["last_error"] = None
 

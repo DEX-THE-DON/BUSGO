@@ -6,8 +6,10 @@ import {
   fetchSaccos,
   toggleVehicleGrounding,
   updateVehicleCompliance,
+  runComplianceSweeper,
   VehicleCompliance,
   Sacco,
+  ComplianceSweeperResult,
   errMsg,
 } from '@/services/api';
 
@@ -49,6 +51,24 @@ export default function FleetComplianceTable() {
       setError(errMsg(err));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const [runningSweeper, setRunningSweeper] = useState(false);
+  const [sweeperResult, setSweeperResult] = useState<ComplianceSweeperResult | null>(null);
+
+  const handleRunSweeper = async () => {
+    try {
+      setRunningSweeper(true);
+      setError('');
+      const res = await runComplianceSweeper();
+      setSweeperResult(res.results);
+      setSuccess(res.message);
+      loadData();
+    } catch (err: unknown) {
+      setError(errMsg(err));
+    } finally {
+      setRunningSweeper(false);
     }
   };
 
@@ -209,8 +229,44 @@ export default function FleetComplianceTable() {
           >
             <span className={loading ? 'animate-spin' : ''}>🔄</span> Refresh
           </button>
+
+          <button
+            onClick={handleRunSweeper}
+            disabled={runningSweeper || loading}
+            className="px-4 py-2 text-xs font-bold text-slate-950 bg-gradient-to-r from-amber-400 to-rose-400 hover:from-amber-300 hover:to-rose-300 rounded-xl transition flex items-center gap-2 shadow-lg shadow-amber-500/20 disabled:opacity-50"
+          >
+            <span>⚡</span>
+            <span>{runningSweeper ? 'Sweeping Fleet…' : 'Run NTSA Sweeper'}</span>
+          </button>
         </div>
       </div>
+
+      {/* Sweeper Result Banner */}
+      {sweeperResult && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-xs text-amber-200 flex items-start justify-between gap-4 animate-in fade-in">
+          <div>
+            <p className="font-bold text-amber-300 text-sm flex items-center gap-2">
+              <span>🛡️</span>
+              <span>NTSA Auto-Grounding Sweeper Pass Finished</span>
+              <span className="text-[10px] text-slate-400 font-normal">
+                ({new Date(sweeperResult.timestamp).toLocaleTimeString()})
+              </span>
+            </p>
+            <p className="mt-1">
+              Audited <span className="font-mono font-bold text-white">{sweeperResult.total_vehicles_checked}</span> fleet vehicles ·{' '}
+              <span className="font-bold text-rose-400">{sweeperResult.auto_grounded_count} newly auto-grounded</span> ·{' '}
+              <span className="font-bold text-emerald-400">{sweeperResult.auto_cleared_count} restored</span> ·{' '}
+              <span className="font-bold text-amber-300">{sweeperResult.suspended_trips_count} scheduled trips suspended</span>.
+            </p>
+          </div>
+          <button
+            onClick={() => setSweeperResult(null)}
+            className="text-slate-400 hover:text-white text-xs px-2 py-1 rounded bg-slate-800/60"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* KPI Stats Strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">

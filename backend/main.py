@@ -1229,7 +1229,9 @@ async def search_trips(
         LEFT JOIN vehicle_types vt ON vt.id = v.vehicle_type_id
         LEFT JOIN saccos s ON s.id = t.sacco_id
         LEFT JOIN saccos sv ON sv.id = v.sacco_id
+        LEFT JOIN vehicle_compliance vc ON vc.vehicle_id = v.id
         WHERE t.status IN ('scheduled', 'boarding', 'in_transit')
+          AND COALESCE(vc.is_grounded, false) = false
           AND (vt.purpose IS NULL OR vt.purpose != 'cargo')
         ORDER BY
             CASE WHEN t.status IN ('scheduled', 'boarding', 'in_transit') THEN 0 ELSE 1 END,
@@ -1897,14 +1899,25 @@ async def book_seat(booking: BookingRequest, db=Depends(get_async_db), current_u
     try:
         trip_data = (await db.execute(
             text("""
-                SELECT t.id, t.fixed_price, t.allow_driver_tier, t.max_surcharge_pct, t.driver_tier,
-                       r.base_fare, r.per_hop_fare, r.fare_matrix
+                SELECT t.id, t.status, t.fixed_price, t.allow_driver_tier, t.max_surcharge_pct, t.driver_tier,
+                       r.base_fare, r.per_hop_fare, r.fare_matrix,
+                       v.plate_number, vc.is_grounded, vc.grounded_reason
                 FROM trips t
                 JOIN routes r ON r.id = t.route_id
+                LEFT JOIN vehicles v ON v.id = t.vehicle_id
+                LEFT JOIN vehicle_compliance vc ON vc.vehicle_id = v.id
                 WHERE t.id = :id;
             """),
             {"id": booking.trip_id}
         )).mappings().first()
+
+        if not trip_data:
+            raise HTTPException(status_code=404, detail="Trip not found.")
+        if trip_data["status"] == 'grounded' or trip_data.get("is_grounded"):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Cannot book seat: Vehicle {trip_data.get('plate_number') or ''} is grounded under NTSA compliance ({trip_data.get('grounded_reason') or 'Safety inspection expired'}).",
+            )
 
         matrix = None
         if trip_data and trip_data.get("fare_matrix"):
@@ -5521,6 +5534,114 @@ async def toggle_grounding(vehicle_id: int, payload: GroundingToggle, db=Depends
         "message": f"Vehicle {row.get('plate_number')} has been {action}.",
         "vehicle_id": vehicle_id,
         "is_grounded": payload.is_grounded,
+    }
+
+
+class DriverPsvBadgeUpdate(BaseModel):
+    psv_badge_number: str
+    psv_badge_expiry: str
+
+
+@app.post("/api/compliance/run-sweeper")
+async def run_compliance_sweeper(
+    db=Depends(get_async_db),
+    _: User = Depends(require_roles('admin', 'sacco_admin')),
+):
+    """
+    On-Demand NTSA Compliance & Auto-Grounding Sweeper Execution.
+    Audits speed governors, inspections, commercial insurance, and driver PSV badges.
+    Auto-grounds non-compliant fleet vehicles and auto-suspends their assigned scheduled trips.
+    """
+    results = await crons.sweep_ntsa_compliance_and_auto_ground(db)
+    return {
+        "ok": True,
+        "message": f"NTSA Sweeper executed: {results['auto_grounded_count']} vehicle(s) auto-grounded, {results['auto_cleared_count']} restored.",
+        "results": results,
+    }
+
+
+@app.get("/api/compliance/summary")
+async def get_compliance_summary(
+    sacco_id: Optional[int] = None,
+    db=Depends(get_async_db),
+    _: User = Depends(require_roles('admin', 'sacco_admin')),
+):
+    """High-level NTSA compliance metrics for executive dashboard."""
+    filter_sql = "WHERE v.sacco_id = :sid" if sacco_id else ""
+    params = {"sid": sacco_id} if sacco_id else {}
+
+    sql = f"""
+    SELECT
+        COUNT(v.id) AS total_fleet,
+        COUNT(CASE WHEN COALESCE(vc.is_grounded, false) = true THEN 1 END) AS grounded_count,
+        COUNT(CASE
+            WHEN COALESCE(vc.is_grounded, false) = false
+             AND (vc.ntsa_inspection_expiry IS NULL OR vc.ntsa_inspection_expiry >= NOW() + INTERVAL '30 days')
+             AND (vc.speed_governor_expiry IS NULL OR vc.speed_governor_expiry >= NOW() + INTERVAL '30 days')
+             AND (vc.insurance_expiry IS NULL OR vc.insurance_expiry >= NOW() + INTERVAL '30 days')
+            THEN 1 END) AS compliant_count,
+        COUNT(CASE
+            WHEN COALESCE(vc.is_grounded, false) = false
+             AND (
+                (vc.ntsa_inspection_expiry IS NOT NULL AND vc.ntsa_inspection_expiry < NOW() + INTERVAL '30 days' AND vc.ntsa_inspection_expiry >= NOW())
+                OR (vc.speed_governor_expiry IS NOT NULL AND vc.speed_governor_expiry < NOW() + INTERVAL '30 days' AND vc.speed_governor_expiry >= NOW())
+                OR (vc.insurance_expiry IS NOT NULL AND vc.insurance_expiry < NOW() + INTERVAL '30 days' AND vc.insurance_expiry >= NOW())
+             )
+            THEN 1 END) AS warning_count
+    FROM vehicles v
+    LEFT JOIN vehicle_compliance vc ON vc.vehicle_id = v.id
+    {filter_sql};
+    """
+    row = (await db.execute(text(sql), params)).mappings().first()
+    total = int(row["total_fleet"]) if row else 0
+    grounded = int(row["grounded_count"]) if row else 0
+    compliant = int(row["compliant_count"]) if row else 0
+    warning = int(row["warning_count"]) if row else 0
+
+    score = round((compliant / max(1, total)) * 100, 1)
+
+    return {
+        "total_fleet": total,
+        "grounded_count": grounded,
+        "compliant_count": compliant,
+        "warning_count": warning,
+        "compliance_score_pct": score,
+        "sweeper_stats": {
+            "total_auto_grounded": crons.CRON_STATS.get("total_auto_grounded", 0),
+            "total_auto_cleared": crons.CRON_STATS.get("total_auto_cleared", 0),
+            "last_sweep": crons.CRON_STATS.get("last_run"),
+        }
+    }
+
+
+@app.post("/api/compliance/drivers/{driver_id}/psv-badge")
+async def update_driver_psv_badge(
+    driver_id: int,
+    payload: DriverPsvBadgeUpdate,
+    db=Depends(get_async_db),
+    _: User = Depends(require_roles('admin', 'sacco_admin')),
+):
+    """Update driver PSV badge certificate and expiry date, re-evaluating fleet compliance."""
+    exp = payload.psv_badge_expiry.strip()
+    await db.execute(
+        text("""
+            UPDATE users
+            SET psv_badge_number = :badge,
+                psv_badge_expiry = CAST(:exp AS timestamptz)
+            WHERE id = :uid;
+        """),
+        {"badge": payload.psv_badge_number.strip().upper(), "exp": exp, "uid": driver_id}
+    )
+    await db.commit()
+
+    # Re-run compliance sweeper to update any vehicle assigned to this driver
+    sweep_res = await crons.sweep_ntsa_compliance_and_auto_ground(db)
+
+    return {
+        "ok": True,
+        "message": f"Driver PSV badge updated to {payload.psv_badge_number.strip().upper()}.",
+        "driver_id": driver_id,
+        "sweep_res": sweep_res,
     }
 
 

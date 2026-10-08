@@ -485,6 +485,33 @@ export const VehicleComplianceSchema = z.object({
 });
 export type VehicleCompliance = z.infer<typeof VehicleComplianceSchema>;
 
+export const ComplianceSweeperResultSchema = z.object({
+  timestamp: z.string(),
+  total_vehicles_checked: z.number(),
+  auto_grounded_count: z.number(),
+  auto_cleared_count: z.number(),
+  suspended_trips_count: z.number(),
+  warnings_count: z.number(),
+  grounded_vehicles: z.array(z.record(z.any())).optional(),
+  cleared_vehicles: z.array(z.record(z.any())).optional(),
+  warnings: z.array(z.record(z.any())).optional(),
+});
+export type ComplianceSweeperResult = z.infer<typeof ComplianceSweeperResultSchema>;
+
+export const ComplianceSummarySchema = z.object({
+  total_fleet: z.number(),
+  grounded_count: z.number(),
+  compliant_count: z.number(),
+  warning_count: z.number(),
+  compliance_score_pct: z.number(),
+  sweeper_stats: z.object({
+    total_auto_grounded: z.number(),
+    total_auto_cleared: z.number(),
+    last_sweep: z.string().nullish(),
+  }).optional(),
+});
+export type ComplianceSummary = z.infer<typeof ComplianceSummarySchema>;
+
 export const VehicleSchema = z.object({
   id: z.number(),
   plate_number: z.string(),

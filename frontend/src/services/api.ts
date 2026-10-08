@@ -115,9 +115,13 @@ import type {
   RescheduleBookingRequest,
   RescheduleBookingResponse,
   CancelToVoucherResponse,
+  ComplianceSweeperResult,
+  ComplianceSummary,
 } from '@busgo/types';
 
 export type {
+  ComplianceSweeperResult,
+  ComplianceSummary,
   AdminAnalytics,
   AppNotification,
   AuthResponse,
@@ -1136,6 +1140,31 @@ export async function toggleVehicleGrounding(
   return apiFetch(`/api/compliance/vehicles/${vehicleId}/ground`, {
     method: 'POST',
     body: JSON.stringify({ is_grounded: isGrounded, reason }),
+  });
+}
+
+export async function runComplianceSweeper(): Promise<{
+  ok: boolean;
+  message: string;
+  results: ComplianceSweeperResult;
+}> {
+  return apiFetch('/api/compliance/run-sweeper', {
+    method: 'POST',
+  });
+}
+
+export async function fetchComplianceSummary(saccoId?: number): Promise<ComplianceSummary> {
+  const query = saccoId ? `?sacco_id=${saccoId}` : '';
+  return apiFetch<ComplianceSummary>(`/api/compliance/summary${query}`);
+}
+
+export async function updateDriverPsvBadge(
+  driverId: number,
+  data: { psv_badge_number: string; psv_badge_expiry: string }
+): Promise<{ ok: boolean; message: string; driver_id: number; sweep_res: ComplianceSweeperResult }> {
+  return apiFetch(`/api/compliance/drivers/${driverId}/psv-badge`, {
+    method: 'POST',
+    body: JSON.stringify(data),
   });
 }
 
