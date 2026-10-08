@@ -109,6 +109,12 @@ import type {
   StageB2CPayoutRequest,
   StageB2CPayoutResponse,
   DispatchOutboxItem,
+  TravelVoucher,
+  MyVouchersResponse,
+  ValidateVoucherResponse,
+  RescheduleBookingRequest,
+  RescheduleBookingResponse,
+  CancelToVoucherResponse,
 } from '@busgo/types';
 
 export type {
@@ -160,6 +166,12 @@ export type {
   StageB2CPayoutRequest,
   StageB2CPayoutResponse,
   DispatchOutboxItem,
+  TravelVoucher,
+  MyVouchersResponse,
+  ValidateVoucherResponse,
+  RescheduleBookingRequest,
+  RescheduleBookingResponse,
+  CancelToVoucherResponse,
 };
 
 /** @deprecated Use `TripOption` (same wire shape, shared with the backend). */
@@ -196,6 +208,7 @@ export async function bookSeatData(data: {
   has_luggage?: boolean;
   luggage_count?: number;
   luggage_description?: string;
+  voucher_code?: string;
 }) {
   return apiFetch<BookSeatResponse>('/api/book-seat', {
     method: 'POST',
@@ -205,6 +218,30 @@ export async function bookSeatData(data: {
 
 export async function payMpesa(data: { phone_number: string; amount: number; booking_id: number }) {
   return apiFetch<{ status: string; message: string; payment_id: number; booking_id: number }>('/api/pay/mpesa-stk', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function fetchMyVouchers() {
+  return apiFetch<MyVouchersResponse>('/api/vouchers/my-vouchers');
+}
+
+export async function validateTravelVoucher(code: string) {
+  return apiFetch<ValidateVoucherResponse>('/api/vouchers/validate', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  });
+}
+
+export async function cancelBookingToVoucher(bookingId: number) {
+  return apiFetch<CancelToVoucherResponse>(`/api/bookings/${bookingId}/cancel-to-voucher`, {
+    method: 'POST',
+  });
+}
+
+export async function rescheduleBooking(bookingId: number, data: RescheduleBookingRequest) {
+  return apiFetch<RescheduleBookingResponse>(`/api/bookings/${bookingId}/reschedule`, {
     method: 'POST',
     body: JSON.stringify(data),
   });
@@ -1229,6 +1266,100 @@ export async function withdrawSaccoFunds(payload: SaccoWithdrawRequest): Promise
     body: JSON.stringify(payload),
   });
 }
+
+export interface VehicleRevenueSplitItem {
+  vehicle_id: number;
+  plate_number: string;
+  vehicle_model: string;
+  purpose: string;
+  sacco_id?: number | null;
+  sacco_name: string;
+  owner_name: string;
+  owner_phone: string;
+  trips_count: number;
+  gross_revenue: number;
+  fuel_deduction: number;
+  conductor_commission: number;
+  other_expenses: number;
+  sacco_levy: number;
+  platform_fee: number;
+  net_earned: number;
+  total_disbursed: number;
+  available_for_owner: number;
+}
+
+export interface VehicleRevenueSplitsResponse {
+  sacco_id?: number | null;
+  total_vehicles: number;
+  totals: {
+    gross_revenue: number;
+    fuel_deductions: number;
+    conductor_commissions: number;
+    sacco_levies: number;
+    platform_fees: number;
+    net_dividends: number;
+    available_payout: number;
+  };
+  vehicles: VehicleRevenueSplitItem[];
+}
+
+export async function fetchVehicleRevenueSplits(saccoId?: number): Promise<VehicleRevenueSplitsResponse> {
+  const q = saccoId ? `?sacco_id=${saccoId}` : '';
+  return apiFetch<VehicleRevenueSplitsResponse>(`/api/settlements/vehicle-splits${q}`);
+}
+
+export async function disburseVehicleOwnerDividend(payload: {
+  vehicle_id: number;
+  amount?: number;
+  recipient_phone?: string;
+  recipient_name?: string;
+  notes?: string;
+}): Promise<{
+  ok: boolean;
+  message: string;
+  settlement_id: number;
+  vehicle_id: number;
+  plate_number: string;
+  b2c_transaction_id: string;
+  b2c_conversation_id: string;
+  net_payout: number;
+  recipient_phone: string;
+  recipient_name: string;
+  status: string;
+  simulated?: boolean;
+}> {
+  return apiFetch('/api/settlements/disburse-vehicle-owner', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function batchDisburseAllOwners(payload: {
+  sacco_id?: number;
+  min_amount?: number;
+  notes?: string;
+}): Promise<{
+  ok: boolean;
+  message: string;
+  disbursed_count: number;
+  total_disbursed: number;
+  results: Array<{
+    vehicle_id: number;
+    plate_number: string;
+    owner_name: string;
+    phone: string;
+    amount: number;
+    status: string;
+    transaction_id?: string;
+    error?: string;
+  }>;
+}> {
+  return apiFetch('/api/settlements/batch-disburse-owners', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
 
 // ---------------------------------------------------------------------------
 // EV Fleet & Telemetry (Option 4)

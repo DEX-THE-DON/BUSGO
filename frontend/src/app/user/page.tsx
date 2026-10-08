@@ -28,6 +28,7 @@ import {
   paystackInitialize,
   updateProfile,
   cancelBooking,
+  cancelBookingToVoucher,
   Booking,
   SeatInterest,
   errMsg,
@@ -36,8 +37,10 @@ import DigitalTicketModal, { TicketBookingData } from '@/components/DigitalTicke
 import LiveTransitMap from '@/components/LiveTransitMap';
 import PassengerBookingFlow from '@/components/PassengerBookingFlow';
 import MzigoTracker from '@/components/user/MzigoTracker';
+import RescheduleModal from '@/components/user/RescheduleModal';
+import TravelVouchersModal from '@/components/user/TravelVouchersModal';
 
-type UserTab = 'overview' | 'book' | 'rides' | 'tracking' | 'waitlist' | 'history' | 'account' | 'mzigo';
+type UserTab = 'overview' | 'book' | 'rides' | 'tracking' | 'waitlist' | 'history' | 'account' | 'mzigo' | 'vouchers';
 
 const statusBadge = (status: string) => {
   const map: Record<string, string> = {
@@ -101,6 +104,8 @@ export default function UserDashboard() {
     message: string;
   } | null>(null);
   const [payingWithPaystack, setPayingWithPaystack] = useState(false);
+  const [reschedulingBooking, setReschedulingBooking] = useState<Booking | null>(null);
+  const [showVouchersModal, setShowVouchersModal] = useState(false);
 
   // Profile editing state
   const [isEditingProfile, setIsEditingProfile] = useState(false);
@@ -162,6 +167,24 @@ export default function UserDashboard() {
     if (!window.confirm('Cancel this booking? The seat will be released to other passengers.')) return;
     try {
       await cancelBooking(bookingId);
+      loadBookings();
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  };
+
+  const handleCancelToVoucher = async (bookingId: number) => {
+    if (
+      !window.confirm(
+        'Cancel this ticket and credit 100% of your fare to an instant 90-day Travel Credit Voucher?'
+      )
+    )
+      return;
+    try {
+      const res = await cancelBookingToVoucher(bookingId);
+      alert(
+        `Ticket cancelled! KES ${res.voucher.remaining_balance.toLocaleString()} has been credited to voucher code: ${res.voucher.code}`
+      );
       loadBookings();
     } catch (err) {
       setError(errMsg(err));
@@ -267,6 +290,7 @@ export default function UserDashboard() {
     {
       title: 'ACCOUNT & SETTINGS',
       items: [
+        { id: 'vouchers', label: 'Travel Credit Vouchers', icon: <IconZap />, badge: 'Wallet' },
         { id: 'account', label: 'Passenger Profile', icon: <IconUsers /> },
       ],
     },
@@ -558,7 +582,7 @@ export default function UserDashboard() {
                               <span className={statusBadge(b.status)}>{b.status}</span>
                               <span className={statusBadge(b.payment_status)}>{b.payment_status}</span>
                             </div>
-                            <div className="flex items-center gap-2 mt-1">
+                            <div className="flex flex-wrap items-center gap-2 mt-1">
                               <button
                                 onClick={() => {
                                   setTrackedBooking(b);
@@ -577,12 +601,28 @@ export default function UserDashboard() {
                                 <span>Boarding Pass</span>
                               </button>
                               {b.status !== 'cancelled' && (
-                                <button
-                                  onClick={() => handleCancel(b.id)}
-                                  className="text-xs bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 font-bold px-3 py-1.5 rounded-lg transition"
-                                >
-                                  Cancel
-                                </button>
+                                <>
+                                  <button
+                                    onClick={() => setReschedulingBooking(b)}
+                                    className="text-xs bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 font-bold px-3 py-1.5 rounded-lg border border-amber-500/30 transition flex items-center gap-1.5 shadow-sm"
+                                  >
+                                    <IconTrip className="w-3.5 h-3.5" />
+                                    <span>Reschedule</span>
+                                  </button>
+                                  <button
+                                    onClick={() => handleCancelToVoucher(b.id)}
+                                    className="text-xs bg-purple-500/10 text-purple-300 hover:bg-purple-500/20 font-bold px-3 py-1.5 rounded-lg border border-purple-500/30 transition flex items-center gap-1.5 shadow-sm"
+                                    title="Cancel and convert 100% of fare to a 90-day Travel Credit Voucher"
+                                  >
+                                    <span>💳 Credit Voucher</span>
+                                  </button>
+                                  <button
+                                    onClick={() => handleCancel(b.id)}
+                                    className="text-xs bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 font-bold px-3 py-1.5 rounded-lg transition"
+                                  >
+                                    Cancel
+                                  </button>
+                                </>
                               )}
                             </div>
                           </div>
@@ -1050,6 +1090,26 @@ export default function UserDashboard() {
                 </div>
               </div>
             )}
+
+            {/* Commuter Reschedule Modal */}
+            <RescheduleModal
+              booking={reschedulingBooking}
+              isOpen={reschedulingBooking !== null}
+              onClose={() => setReschedulingBooking(null)}
+              onSuccess={(res) => {
+                alert(res.message);
+                loadBookings();
+              }}
+            />
+
+            {/* Travel Vouchers Modal */}
+            <TravelVouchersModal
+              isOpen={tab === 'vouchers' || showVouchersModal}
+              onClose={() => {
+                setShowVouchersModal(false);
+                if (tab === 'vouchers') setTab('rides');
+              }}
+            />
           </>
         )}
       </FluxDashboardShell>

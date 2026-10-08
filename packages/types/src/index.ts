@@ -158,6 +158,8 @@ export const BookSeatResponseSchema = z.object({
   booking_id: z.number(),
   payment_id: z.number(),
   amount: z.number().optional(),
+  voucher_discount: z.number().optional(),
+  net_amount: z.number().optional(),
   message: z.string(),
 });
 export type BookSeatResponse = z.infer<typeof BookSeatResponseSchema>;
@@ -186,6 +188,9 @@ export const BookingSchema = z.object({
   current_speed: z.number().nullable().optional(),
   current_heading: z.number().nullable().optional(),
   last_gps_at: z.string().nullable().optional(),
+  voucher_code: z.string().nullable().optional(),
+  voucher_discount: z.number().nullable().optional(),
+  rescheduled_from_id: z.number().nullable().optional(),
 });
 export type Booking = z.infer<typeof BookingSchema>;
 
@@ -1087,6 +1092,71 @@ export const ParcelSchema = z.object({
   timeline: z.array(ParcelTimelineStepSchema).optional(),
 });
 export type Parcel = z.infer<typeof ParcelSchema>;
+
+// ---------------------------------------------------------------------------
+// Commuter Travel Credit Vouchers & Rescheduling
+// ---------------------------------------------------------------------------
+
+export const TravelVoucherSchema = z.object({
+  id: z.number(),
+  code: z.string(),
+  user_id: z.number(),
+  original_booking_id: z.number().nullable().optional(),
+  initial_amount: z.number(),
+  remaining_balance: z.number(),
+  currency: z.string().default('KES'),
+  status: z.string(), // 'active' | 'redeemed' | 'expired'
+  expires_at: z.string(),
+  redeemed_at: z.string().nullable().optional(),
+  created_at: z.string().nullable().optional(),
+});
+export type TravelVoucher = z.infer<typeof TravelVoucherSchema>;
+
+export const MyVouchersResponseSchema = z.object({
+  vouchers: z.array(TravelVoucherSchema),
+});
+export type MyVouchersResponse = z.infer<typeof MyVouchersResponseSchema>;
+
+export const ValidateVoucherResponseSchema = z.object({
+  valid: z.boolean(),
+  voucher: TravelVoucherSchema.optional(),
+  discount_amount: z.number().optional(),
+  message: z.string(),
+});
+export type ValidateVoucherResponse = z.infer<typeof ValidateVoucherResponseSchema>;
+
+export const RescheduleBookingRequestSchema = z.object({
+  new_trip_id: z.number(),
+  new_seat_number: z.number(),
+  new_board_stop_order: z.number().optional(),
+  new_alight_stop_order: z.number().optional(),
+  confirm_topup: z.boolean().optional(),
+});
+export type RescheduleBookingRequest = z.infer<typeof RescheduleBookingRequestSchema>;
+
+export const RescheduleBookingResponseSchema = z.object({
+  success: z.boolean(),
+  message: z.string(),
+  booking_id: z.number(),
+  old_trip_id: z.number().optional(),
+  new_trip_id: z.number().optional(),
+  old_seat_number: z.number().optional(),
+  new_seat_number: z.number().optional(),
+  fare_difference: z.number().optional(),
+  voucher_issued: TravelVoucherSchema.nullable().optional(),
+  requires_topup: z.boolean().optional(),
+  topup_amount: z.number().optional(),
+  old_fare: z.number().optional(),
+  new_fare: z.number().optional(),
+});
+export type RescheduleBookingResponse = z.infer<typeof RescheduleBookingResponseSchema>;
+
+export const CancelToVoucherResponseSchema = z.object({
+  success: z.boolean(),
+  message: z.string(),
+  voucher: TravelVoucherSchema,
+});
+export type CancelToVoucherResponse = z.infer<typeof CancelToVoucherResponseSchema>;
 
 
 

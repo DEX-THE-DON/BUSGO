@@ -76,11 +76,14 @@ class Vehicle(Base):
     cargo_tonnage_capacity = Column(Float, nullable=True)
     is_electric = Column(Boolean, nullable=False, default=False)
     chassis_number = Column(String, nullable=True)
-    manufacture_year = Column(Integer, nullable=True)
+    owner_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    owner_name = Column(String, nullable=True)
+    owner_phone = Column(String, nullable=True)
     created_at = Column(TIMESTAMP(timezone=True))
 
     sacco = relationship('Sacco', back_populates='vehicles')
     driver = relationship('User', foreign_keys=[driver_id])
+    owner = relationship('User', foreign_keys=[owner_id])
     vehicle_type = relationship('VehicleType', back_populates='vehicles')
     trips = relationship('Trip', back_populates='vehicle')
     compliance = relationship('VehicleCompliance', back_populates='vehicle', uselist=False)
@@ -195,6 +198,9 @@ class Booking(Base):
     luggage_count = Column(Integer, nullable=False, default=0)
     luggage_fee = Column(Float, nullable=False, default=0.0)
     luggage_description = Column(String, nullable=True)
+    voucher_code = Column(String, nullable=True)
+    voucher_discount = Column(Float, nullable=False, default=0.0)
+    rescheduled_from_id = Column(Integer, ForeignKey('bookings.id'), nullable=True)
     created_at = Column(TIMESTAMP(timezone=True))
 
     trip = relationship('Trip', back_populates='bookings')
@@ -384,11 +390,13 @@ class SaccoSettlement(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     sacco_id = Column(Integer, ForeignKey('saccos.id'), nullable=False)
+    vehicle_id = Column(Integer, ForeignKey('vehicles.id'), nullable=True)
     gross_amount = Column(Float, nullable=False)
     platform_fee = Column(Float, nullable=False, default=0.0) # 3% platform commission
     net_payout = Column(Float, nullable=False) # 97% net disbursed
     recipient_phone = Column(String, nullable=False)
     recipient_name = Column(String, nullable=False)
+    settlement_type = Column(String, nullable=False, default='sacco_treasury') # 'sacco_treasury' | 'vehicle_owner_dividend' | 'conductor_commission'
     b2c_conversation_id = Column(String, nullable=True)
     b2c_transaction_id = Column(String, nullable=True)
     status = Column(String, nullable=False, default='completed') # 'pending' | 'completed' | 'failed'
@@ -396,6 +404,7 @@ class SaccoSettlement(Base):
     created_at = Column(TIMESTAMP(timezone=True), default=func.now())
 
     sacco = relationship('Sacco', back_populates='settlements')
+    vehicle = relationship('Vehicle')
 
 
 class VehicleTelemetry(Base):
@@ -547,6 +556,31 @@ class AuditLog(Base):
 
     actor = relationship('User', foreign_keys=[actor_user_id])
     supervisor = relationship('User', foreign_keys=[supervisor_user_id])
+
+
+class TravelVoucher(Base):
+    """
+    Commuter Travel Credit & Rescheduling Vouchers.
+    Issued upon cancellation or voluntary change of travel plans;
+    redeemable for 100% fare credit across any future BUSGO corridor booking.
+    """
+    __tablename__ = 'travel_vouchers'
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String, unique=True, nullable=False, index=True) # e.g. "BG-VCH-8F2D1A"
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    original_booking_id = Column(Integer, ForeignKey('bookings.id'), nullable=True)
+    initial_amount = Column(Float, nullable=False)
+    remaining_balance = Column(Float, nullable=False)
+    currency = Column(String, nullable=False, default='KES')
+    status = Column(String, nullable=False, default='active') # 'active' | 'partially_used' | 'redeemed' | 'expired'
+    expires_at = Column(TIMESTAMP(timezone=True), nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), default=func.now())
+    redeemed_at = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    user = relationship('User')
+    original_booking = relationship('Booking', foreign_keys=[original_booking_id])
+
 
 
 

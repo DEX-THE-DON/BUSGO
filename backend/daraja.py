@@ -21,6 +21,7 @@ set, and the simulated M-Pesa flow remains available for local dev.
 """
 import base64
 import os
+import uuid
 from datetime import datetime
 from typing import Optional
 
@@ -40,6 +41,13 @@ CALLBACK_URL = os.getenv(
     "MPESA_CALLBACK_URL",
     "https://your-domain.example.com/api/pay/daraja/callback",
 )
+
+# B2C (Business to Customer) Disbursals for Vehicle Owner Dividends & SACCO Payouts
+B2C_INITIATOR = os.getenv("MPESA_B2C_INITIATOR", "busgo_admin")
+B2C_SECURITY_CREDENTIAL = os.getenv("MPESA_B2C_SECURITY_CREDENTIAL", "")
+B2C_SHORTCODE = os.getenv("MPESA_B2C_SHORTCODE", "600000")
+B2C_RESULT_URL = os.getenv("MPESA_B2C_RESULT_URL", "https://your-domain.example.com/api/pay/daraja/b2c-result")
+B2C_TIMEOUT_URL = os.getenv("MPESA_B2C_TIMEOUT_URL", "https://your-domain.example.com/api/pay/daraja/b2c-timeout")
 
 
 def configured() -> bool:
@@ -166,3 +174,92 @@ async def query_stk_status(checkout_request_id: str) -> dict:
         )
         resp.raise_for_status()
         return resp.json()
+
+
+def b2c_configured() -> bool:
+    """Returns True if Safaricom B2C credentials are configured in the environment."""
+    return bool(CONSUMER_KEY and CONSUMER_SECRET and B2C_SECURITY_CREDENTIAL)
+
+
+async def b2c_payment_request(
+    phone: str,
+    amount: float,
+    remarks: str = "BUSGO Owner Dividend Payout",
+    occasion: Optional[str] = None,
+    command_id: str = "BusinessPayment",
+) -> dict:
+    """
+    Safaricom Daraja B2C Payment Request API.
+    Disburses funds from SACCO / Platform Bulk Till directly to a Recipient M-Pesa Wallet.
+    Used for automated daily Vehicle Owner dividends, conductor wages, and stage reconciliations.
+    Endpoint: POST /mpesa/b2c/v1/paymentrequest
+    """
+    normalized = normalize_phone(phone)
+    amt_int = int(round(amount))
+
+    if not b2c_configured():
+        # Simulated response for sandbox environments & local test runs
+        sim_conv = f"AG_B2C_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6].upper()}"
+        sim_trans = f"B2C{uuid.uuid4().hex[:8].upper()}"
+        return {
+            "ConversationID": sim_conv,
+            "OriginatorConversationID": f"ORIG_{uuid.uuid4().hex[:8]}",
+            "ResponseCode": "0",
+            "ResponseDescription": "Accept the service request successfully (Simulated B2C).",
+            "transaction_id": sim_trans,
+            "simulated": True,
+        }
+
+    token = await get_access_token()
+    payload = {
+        "InitiatorName": B2C_INITIATOR,
+        "SecurityCredential": B2C_SECURITY_CREDENTIAL,
+        "CommandID": command_id,  # 'BusinessPayment' | 'SalaryPayment' | 'PromotionPayment'
+        "Amount": amt_int,
+        "PartyA": B2C_SHORTCODE,
+        "PartyB": normalized,
+        "Remarks": remarks[:100],
+        "QueueTimeOutURL": B2C_TIMEOUT_URL,
+        "ResultURL": B2C_RESULT_URL,
+        "Occasion": (occasion or "Dividend")[:100],
+    }
+
+    async with httpx.AsyncClient(timeout=25) as client:
+        resp = await client.post(
+            f"{BASE_URL}/mpesa/b2c/v1/paymentrequest",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+def parse_b2c_callback(body: dict) -> Optional[dict]:
+    """
+    Extracts structured fields from Safaricom B2C Result callback payload.
+    Returns None if payload is not a valid B2C Result.
+    """
+    try:
+        result = body.get("Result", {})
+        result_type = result.get("ResultType")
+        result_code = result.get("ResultCode")
+        result_desc = result.get("ResultDesc", "")
+        originator_conv_id = result.get("OriginatorConversationID")
+        conv_id = result.get("ConversationID")
+        trans_id = result.get("TransactionID")
+        params = {}
+        for item in (result.get("ResultParameters") or {}).get("ResultParameter", []):
+            params[item.get("Key")] = item.get("Value")
+
+        return {
+            "result_type": result_type,
+            "result_code": result_code,
+            "result_desc": result_desc,
+            "conversation_id": conv_id,
+            "originator_conversation_id": originator_conv_id,
+            "transaction_id": trans_id,
+            "parameters": params,
+        }
+    except (KeyError, TypeError, AttributeError):
+        return None
+

@@ -30,6 +30,7 @@ import {
   createSeatInterest,
   fetchMyLoyalty,
   redeemLoyaltyPoints,
+  validateTravelVoucher,
   LoyaltyInfo,
   TripSearchResult,
   TripOption,
@@ -113,6 +114,36 @@ export default function PassengerBookingFlow({
   const [showGroupModal, setShowGroupModal] = useState(false);
   const [loyalty, setLoyalty] = useState<LoyaltyInfo | null>(null);
   const [redeemPoints, setRedeemPoints] = useState(false);
+
+  // Voucher credit state
+  const [voucherCodeInput, setVoucherCodeInput] = useState('');
+  const [appliedVoucher, setAppliedVoucher] = useState<{ code: string; discount: number } | null>(null);
+  const [validatingVoucher, setValidatingVoucher] = useState(false);
+  const [voucherNotice, setVoucherNotice] = useState('');
+
+  const handleApplyVoucher = async () => {
+    if (!voucherCodeInput.trim()) return;
+    setValidatingVoucher(true);
+    setVoucherNotice('');
+    try {
+      const res = await validateTravelVoucher(voucherCodeInput.trim());
+      if (res.valid && res.voucher) {
+        setAppliedVoucher({
+          code: res.voucher.code,
+          discount: res.voucher.remaining_balance,
+        });
+        setVoucherNotice(`Voucher applied! Up to KES ${res.voucher.remaining_balance.toLocaleString()} discount.`);
+      } else {
+        setVoucherNotice(res.message || 'Invalid or expired voucher code.');
+        setAppliedVoucher(null);
+      }
+    } catch (err) {
+      setVoucherNotice(errMsg(err));
+      setAppliedVoucher(null);
+    } finally {
+      setValidatingVoucher(false);
+    }
+  };
 
   // Feedback notifications
   const [error, setError] = useState('');
@@ -285,12 +316,38 @@ export default function PassengerBookingFlow({
         has_luggage: hasLuggage,
         luggage_count: hasLuggage ? luggageCount : 0,
         luggage_description: hasLuggage ? luggageDesc : undefined,
+        voucher_code: appliedVoucher ? appliedVoucher.code : undefined,
       });
+
+      // If fully covered by travel credit voucher, confirm immediately!
+      if (res.status === 'confirmed') {
+        setPaid(true);
+        setMessage(`Voucher applied! Seat #${selectedSeat} is 100% covered and confirmed.`);
+        const ticketData: TicketBookingData = {
+          id: res.booking_id,
+          trip_id: selectedTrip.id,
+          seat_number: selectedSeat,
+          board_stop_order: boardStop,
+          alight_stop_order: alightStop,
+          status: 'confirmed',
+          payment_status: 'paid',
+          trip_name: selectedTrip.name,
+          route_name: selectedTrip.route_name,
+          board_stop: boardStopObj?.stop_name,
+          alight_stop: alightStopObj?.stop_name,
+          vehicle_plate: selectedTrip.plate_number ?? undefined,
+        };
+        setConfirmedBookingData(ticketData);
+        if (onBookingComplete) {
+          onBookingComplete(res.booking_id, ticketData);
+        }
+        return;
+      }
 
       setPendingBooking({
         booking_id: res.booking_id,
         seat: selectedSeat,
-        amount: res.amount ?? (segmentFare + (hasLuggage ? luggageCount * 150 : 0)),
+        amount: res.net_amount ?? (res.amount ?? (segmentFare + (hasLuggage ? luggageCount * 150 : 0))),
       });
       setPaid(false);
       setStkPromptSent(false);
@@ -862,6 +919,45 @@ export default function PassengerBookingFlow({
                   />
                 </div>
               </div>
+            )}
+          </div>
+        )}
+
+        {/* Travel Credit Voucher Section */}
+        {selectedSeat && (
+          <div className="rounded-2xl border border-slate-800 bg-[#121624] p-4 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <span className="font-bold text-slate-300 flex items-center gap-1.5">
+                <span>🎟️</span>
+                <span>Have a Travel Voucher or Credit Code?</span>
+              </span>
+              {appliedVoucher && (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  Applied: {appliedVoucher.code} (-KES {appliedVoucher.discount.toLocaleString()})
+                </span>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                placeholder="e.g. VCH-98F1-4A2B"
+                value={voucherCodeInput}
+                onChange={(e) => setVoucherCodeInput(e.target.value.toUpperCase())}
+                className="flex-1 rounded-xl border border-slate-700 bg-slate-900 p-2 font-mono text-xs text-white uppercase placeholder-slate-500 focus:border-cyan-400 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={handleApplyVoucher}
+                disabled={validatingVoucher || !voucherCodeInput.trim()}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-cyan-300 font-bold rounded-xl transition border border-slate-700 disabled:opacity-40"
+              >
+                {validatingVoucher ? 'Checking…' : 'Apply Voucher'}
+              </button>
+            </div>
+            {voucherNotice && (
+              <p className={`mt-2 text-[11px] ${appliedVoucher ? 'text-emerald-400 font-semibold' : 'text-amber-400'}`}>
+                {voucherNotice}
+              </p>
             )}
           </div>
         )}
