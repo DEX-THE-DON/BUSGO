@@ -35,6 +35,8 @@ from backend import daraja
 from backend import paystack
 from backend import dispatch
 from backend import crons
+from backend import reconciliation
+from backend.locks import seat_lock_manager
 from backend.models import (
     Base,
     Booking,
@@ -62,6 +64,7 @@ from backend.models import (
     GroupBookingMember,
     StageReconciliation,
     LostFoundItem,
+    AuditLog,
 )
 
 app = FastAPI(title="BUSGO API", version="1.0.0")
@@ -1415,6 +1418,146 @@ async def board_passenger(
     }
 
 
+class OfflineSyncItem(BaseModel):
+    booking_id: Optional[int] = None
+    ticket_code: Optional[str] = None
+    seat_number: Optional[int] = None
+    scanned_at: Optional[str] = None
+
+
+class OfflineSyncBatchRequest(BaseModel):
+    scans: List[OfflineSyncItem]
+    synced_at: Optional[str] = None
+
+
+@app.post("/api/trips/{trip_id}/offline-sync")
+async def batch_offline_manifest_sync(
+    trip_id: int,
+    payload: OfflineSyncBatchRequest,
+    db=Depends(get_async_db),
+    current_user: User = Depends(require_roles('driver', 'admin')),
+):
+    """
+    Deterministic batch reconciliation of offline scans made in highway dead zones.
+    Handles idempotent boardings, detects cancelled-ticket conflicts, and broadcasts updates.
+    """
+    if current_user.role == 'driver':
+        driver_trip = (await db.execute(
+            text("SELECT id FROM trips WHERE id = :id AND driver_id = :driver_id;"),
+            {"id": trip_id, "driver_id": current_user.id},
+        )).scalars().first()
+        if driver_trip is None:
+            raise HTTPException(status_code=403, detail="This trip is not assigned to you.")
+
+    boarded_count = 0
+    already_boarded_count = 0
+    conflict_count = 0
+    results = []
+
+    for item in payload.scans:
+        b_id = item.booking_id
+        if not b_id and item.ticket_code:
+            code = item.ticket_code.strip()
+            parts = code.replace(":", "-").split("-")
+            for part in parts:
+                if part.isdigit():
+                    b_id = int(part)
+                    break
+
+        if not b_id and item.seat_number:
+            match = (await db.execute(
+                text("SELECT id, status FROM bookings WHERE trip_id = :tid AND seat_number = :snum ORDER BY id DESC LIMIT 1;"),
+                {"tid": trip_id, "snum": item.seat_number}
+            )).mappings().first()
+            if match:
+                b_id = match["id"]
+
+        if not b_id:
+            results.append({"item": item.dict(), "status": "error", "message": "Cannot resolve booking ID"})
+            conflict_count += 1
+            continue
+
+        b_row = (await db.execute(
+            text("SELECT id, seat_number, status FROM bookings WHERE id = :id AND trip_id = :tid;"),
+            {"id": b_id, "tid": trip_id}
+        )).mappings().first()
+
+        if not b_row:
+            results.append({"booking_id": b_id, "status": "not_found", "message": "Booking not found on trip"})
+            conflict_count += 1
+            continue
+
+        cur_status = b_row["status"]
+        seat_num = b_row["seat_number"]
+
+        if cur_status == 'boarded':
+            already_boarded_count += 1
+            results.append({"booking_id": b_id, "seat_number": seat_num, "status": "already_boarded"})
+        elif cur_status == 'cancelled':
+            conflict_count += 1
+            results.append({"booking_id": b_id, "seat_number": seat_num, "status": "conflict_cancelled", "message": "Ticket was cancelled before offline boarding"})
+        else:
+            await db.execute(
+                text("UPDATE bookings SET status = 'boarded' WHERE id = :id;"),
+                {"id": b_id}
+            )
+            boarded_count += 1
+            results.append({"booking_id": b_id, "seat_number": seat_num, "status": "boarded_synced"})
+            await manager.broadcast_trip(trip_id, {
+                "event": "passenger_boarded",
+                "booking_id": b_id,
+                "seat_number": seat_num,
+                "offline_synced": True,
+            })
+
+    await db.commit()
+
+    # Log sync event to immutable audit trail
+    await db.execute(text("""
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id SERIAL PRIMARY KEY,
+            action VARCHAR(100) NOT NULL,
+            entity_type VARCHAR(100) NOT NULL,
+            entity_id INTEGER NOT NULL,
+            actor_user_id INTEGER,
+            actor_role VARCHAR(50) NOT NULL,
+            supervisor_pin_verified BOOLEAN NOT NULL DEFAULT FALSE,
+            supervisor_user_id INTEGER,
+            previous_state JSONB,
+            new_state JSONB,
+            reason TEXT,
+            ip_address VARCHAR(100),
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+    """))
+    await db.execute(text("""
+        INSERT INTO audit_logs (
+            action, entity_type, entity_id, actor_user_id, actor_role,
+            supervisor_pin_verified, previous_state, new_state, reason, created_at
+        ) VALUES (
+            'offline_manifest_sync', 'trip', :tid, :uid, :role,
+            FALSE, NULL, :new::jsonb, :reason, NOW()
+        );
+    """), {
+        "tid": trip_id,
+        "uid": current_user.id,
+        "role": current_user.role,
+        "new": json.dumps({"scans_total": len(payload.scans), "boarded": boarded_count, "conflicts": conflict_count}),
+        "reason": f"Conductor offline dead-zone sync pass: {boarded_count} boarded, {conflict_count} conflicts",
+    })
+    await db.commit()
+
+    return {
+        "ok": True,
+        "trip_id": trip_id,
+        "total_scans": len(payload.scans),
+        "boarded_count": boarded_count,
+        "already_boarded_count": already_boarded_count,
+        "conflict_count": conflict_count,
+        "results": results,
+    }
+
+
 @app.get("/api/driver/trips")
 async def driver_trips(db=Depends(get_async_db), current_user: User = Depends(require_roles('driver', 'admin'))):
     """Driver/Admin-only: the trips assigned to the authenticated driver
@@ -1696,6 +1839,20 @@ class BookingRequest(BaseModel):
 async def book_seat(booking: BookingRequest, db=Depends(get_async_db), current_user: User = Depends(get_current_user)):
     """Create a booking for the AUTHENTICATED user (the client cannot choose
     who the booking belongs to). Supports accompanied luggage add-ons."""
+    # Fast in-memory check for concurrent seat lock conflict
+    is_conflict, conflict_lock = await seat_lock_manager.check_lock_conflict(
+        trip_id=booking.trip_id,
+        seat_number=booking.seat_number,
+        board_order=booking.board_stop_order,
+        alight_order=booking.alight_stop_order,
+        requesting_user_id=current_user.id,
+    )
+    if is_conflict and conflict_lock:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Seat {booking.seat_number} is temporarily locked by another commuter ({conflict_lock.seconds_remaining}s remaining).",
+        )
+
     try:
         trip_data = (await db.execute(
             text("""
@@ -1768,6 +1925,9 @@ async def book_seat(booking: BookingRequest, db=Depends(get_async_db), current_u
         payment_id = pres.scalar_one()
 
         await db.commit()
+
+        # Release temporary lock as booking is now created in DB
+        await seat_lock_manager.release_lock(booking.trip_id, booking.seat_number, user_id=current_user.id)
 
     except DBAPIError as e:
         await db.rollback()
@@ -2319,7 +2479,40 @@ async def get_booking_dispatch_preview(
     }
 
 
-@app.get("/api/admin/dispatches")
+@app.post("/api/bookings/{booking_id}/reconcile")
+async def reconcile_single_booking(
+    booking_id: int,
+    db=Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Actively query payment gateway (Daraja STK / Paystack) and resolve stranded or delayed payment status."""
+    booking = (await db.execute(
+        text("SELECT id, user_id FROM bookings WHERE id = :id;"), {"id": booking_id}
+    )).mappings().first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found.")
+    if booking["user_id"] != current_user.id and current_user.role not in ('admin', 'driver'):
+        raise HTTPException(status_code=403, detail="Not authorized to reconcile this booking.")
+
+    result = await reconciliation.reconcile_booking_payment(db, booking_id)
+    return result
+
+
+@app.post("/api/admin/reconcile-all")
+async def reconcile_all_pending_bookings(
+    max_age_minutes: int = 5,
+    db=Depends(get_async_db),
+    _: User = Depends(require_roles('admin')),
+):
+    """Admin endpoint: sweep and actively reconcile all pending bookings against gateways."""
+    sweep_res = await crons.sweep_expired_pending_bookings(db, max_age_minutes=max_age_minutes)
+    return {
+        "status": "success",
+        "sweep_summary": sweep_res,
+        "cron_stats": crons.get_cron_stats(),
+    }
+
+
 async def list_admin_dispatches(
     limit: int = 50,
     db=Depends(get_async_db),
@@ -3189,23 +3382,144 @@ async def paystack_webhook(request: Request, db=Depends(get_async_db)):
 # --------------------------------------------------------------------------
 # Bookings: cancellation (frees the seat chain + notifies waitlists)
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Bookings: cancellation with Supervisor PIN & Immutable Audit Trail
+# --------------------------------------------------------------------------
+SUPERVISOR_PIN = os.getenv("SUPERVISOR_PIN", "9876")
+
+
+class BookingCancellationPayload(BaseModel):
+    reason: Optional[str] = "Customer requested cancellation"
+    supervisor_pin: Optional[str] = None
+
+
 @app.delete("/api/bookings/{booking_id}")
-async def cancel_booking(booking_id: int, db=Depends(get_async_db), current_user: User = Depends(get_current_user)):
-    booking = (await db.execute(
-        text("SELECT id, trip_id, seat_number, user_id FROM bookings WHERE id = :id;"),
-        {"id": booking_id},
-    )).mappings().first()
+async def cancel_booking(
+    booking_id: int,
+    payload: Optional[BookingCancellationPayload] = None,
+    supervisor_pin: Optional[str] = None,
+    reason: Optional[str] = None,
+    request: Request = None,
+    db=Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Cancels a booking with Role-Based Access Control and an Immutable Audit Log.
+    Staff/drivers/clerks MUST provide a valid Supervisor PIN to prevent fraud and cash theft.
+    Sends immediate alert SMS to passenger upon staff-initiated cancellation.
+    """
+    # 1. Fetch full booking details
+    query = text("""
+        SELECT b.id, b.trip_id, b.seat_number, b.user_id, b.status, b.payment_status,
+               u.phone AS user_phone, u.full_name AS user_name, t.name AS trip_name
+        FROM bookings b
+        JOIN trips t ON t.id = b.trip_id
+        LEFT JOIN users u ON u.id = b.user_id
+        WHERE b.id = :id;
+    """)
+    booking = (await db.execute(query, {"id": booking_id})).mappings().first()
     if booking is None:
         raise HTTPException(status_code=404, detail="Booking not found.")
-    if booking["user_id"] != current_user.id and current_user.role not in ('admin', 'driver'):
-        raise HTTPException(status_code=403, detail="You can only cancel your own booking.")
 
+    pin = (payload.supervisor_pin if payload and payload.supervisor_pin else supervisor_pin)
+    cancel_reason = (payload.reason if payload and payload.reason else reason) or "Customer requested cancellation"
+    pin_verified = False
+
+    # 2. RBAC & Supervisor PIN Validation
+    is_owner = (booking["user_id"] == current_user.id)
+    if not is_owner:
+        if current_user.role not in ('admin', 'driver', 'sacco_admin'):
+            raise HTTPException(status_code=403, detail="You can only cancel your own booking.")
+        
+        # Admin can cancel without PIN; drivers/conductors/clerks require Supervisor PIN
+        if current_user.role in ('driver', 'sacco_admin'):
+            if not pin or str(pin).strip() != SUPERVISOR_PIN:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Supervisor authorization required: Invalid or missing Supervisor PIN to cancel this ticket.",
+                )
+            pin_verified = True
+        elif current_user.role == 'admin':
+            pin_verified = True if (pin and str(pin).strip() == SUPERVISOR_PIN) else False
+    else:
+        # Commuter cancelling their own booking
+        if booking["status"] == "confirmed" or booking["payment_status"] == "paid":
+            # Paid ticket cancellation
+            if pin and str(pin).strip() == SUPERVISOR_PIN:
+                pin_verified = True
+
+    # 3. Ensure audit_logs table exists
+    await db.execute(text("""
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id SERIAL PRIMARY KEY,
+            action VARCHAR(100) NOT NULL,
+            entity_type VARCHAR(100) NOT NULL,
+            entity_id INTEGER NOT NULL,
+            actor_user_id INTEGER,
+            actor_role VARCHAR(50) NOT NULL,
+            supervisor_pin_verified BOOLEAN NOT NULL DEFAULT FALSE,
+            supervisor_user_id INTEGER,
+            previous_state JSONB,
+            new_state JSONB,
+            reason TEXT,
+            ip_address VARCHAR(100),
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+    """))
+
+    # 4. Perform cancellation
     await db.execute(
         text("UPDATE bookings SET status = 'cancelled' WHERE id = :id;"), {"id": booking_id}
     )
+
+    # 5. Record immutable audit log
+    previous_state = {
+        "status": booking["status"],
+        "payment_status": booking["payment_status"],
+        "seat_number": booking["seat_number"],
+        "trip_id": booking["trip_id"],
+        "user_id": booking["user_id"],
+        "passenger_phone": booking["user_phone"],
+    }
+    new_state = {
+        "status": "cancelled",
+        "payment_status": booking["payment_status"],
+    }
+    client_ip = request.client.host if (request and request.client) else None
+
+    await db.execute(text("""
+        INSERT INTO audit_logs (
+            action, entity_type, entity_id, actor_user_id, actor_role,
+            supervisor_pin_verified, previous_state, new_state, reason, ip_address, created_at
+        ) VALUES (
+            'booking_cancellation', 'booking', :eid, :uid, :role,
+            :pin_verified, :prev::jsonb, :new::jsonb, :reason, :ip, NOW()
+        );
+    """), {
+        "eid": booking_id,
+        "uid": current_user.id,
+        "role": current_user.role,
+        "pin_verified": pin_verified,
+        "prev": json.dumps(previous_state),
+        "new": json.dumps(new_state),
+        "reason": cancel_reason,
+        "ip": client_ip,
+    })
     await db.commit()
 
-    # The seat just freed up — recompute the chain and let waitlists know.
+    # 6. Passenger fraud protection alert: dispatch SMS if staff cancelled passenger ticket
+    if booking["user_phone"] and not is_owner:
+        alert_msg = (
+            f"BUSGO ALERT: Your booking #{booking_id} for Seat {booking['seat_number']} on {booking['trip_name'] or 'Trip'} "
+            f"was CANCELLED by terminal staff. Reason: {cancel_reason}. "
+            f"If this cancellation was unauthorized, please contact station support immediately."
+        )
+        try:
+            await dispatch.send_sms_notification(booking["user_phone"], alert_msg)
+        except Exception as e:
+            logger.warning(f"Could not dispatch cancellation SMS: {e}")
+
+    # 7. Free the seat chain & notify waitlists
     stop_names = await trip_stop_names(db, booking["trip_id"])
     chain = await recompute_chain(db, booking["trip_id"], booking["seat_number"])
     await notify_chain_change(db, manager, booking["trip_id"], booking["seat_number"], chain, stop_names)
@@ -3215,7 +3529,66 @@ async def cancel_booking(booking_id: int, db=Depends(get_async_db), current_user
         "seat_number": booking["seat_number"],
         "booking_id": booking_id,
     })
-    return {"deleted": booking_id, "seat_freed": True}
+
+    return {
+        "deleted": booking_id,
+        "seat_freed": True,
+        "audit_logged": True,
+        "supervisor_verified": pin_verified,
+        "reason": cancel_reason,
+    }
+
+
+@app.get("/api/admin/audit-logs")
+async def list_audit_logs(
+    action: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    limit: int = 100,
+    db=Depends(get_async_db),
+    _: User = Depends(require_roles('admin')),
+):
+    """Admin view of the immutable audit trail for security investigations."""
+    # Ensure audit_logs table exists
+    await db.execute(text("""
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id SERIAL PRIMARY KEY,
+            action VARCHAR(100) NOT NULL,
+            entity_type VARCHAR(100) NOT NULL,
+            entity_id INTEGER NOT NULL,
+            actor_user_id INTEGER,
+            actor_role VARCHAR(50) NOT NULL,
+            supervisor_pin_verified BOOLEAN NOT NULL DEFAULT FALSE,
+            supervisor_user_id INTEGER,
+            previous_state JSONB,
+            new_state JSONB,
+            reason TEXT,
+            ip_address VARCHAR(100),
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+    """))
+    conditions = []
+    params = {"limit": limit}
+    if action:
+        conditions.append("a.action = :action")
+        params["action"] = action
+    if entity_type:
+        conditions.append("a.entity_type = :entity_type")
+        params["entity_type"] = entity_type
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"""
+        SELECT a.id, a.action, a.entity_type, a.entity_id, a.actor_user_id, a.actor_role,
+               a.supervisor_pin_verified, a.previous_state, a.new_state, a.reason,
+               a.ip_address, a.created_at, u.full_name AS actor_name, u.phone AS actor_phone
+        FROM audit_logs a
+        LEFT JOIN users u ON u.id = a.actor_user_id
+        {where_clause}
+        ORDER BY a.id DESC
+        LIMIT :limit;
+    """
+    rows = (await db.execute(text(sql), params)).mappings().all()
+    return {"total": len(rows), "audit_logs": [dict(r) for r in rows]}
+
 
 
 # --------------------------------------------------------------------------
@@ -3344,11 +3717,26 @@ async def get_seat_map(trip_id: int, board_order: int = 1, alight_order: int = 2
 
     stop_by_order = {o["alight_stop_order"]: o["alight_stop"] for iv in overlaps for o in [iv]}
 
+    # Query active in-memory TTL locks for this trip overlapping this route segment
+    active_locks = await seat_lock_manager.get_locks_for_trip(trip_id, board_order, alight_order)
+    locked_seat_map = {l["seat_number"]: l for l in active_locks}
+
     seats = []
     for num in range(1, capacity + 1):
         occ = by_seat.get(num, [])
+        lock = locked_seat_map.get(num)
+        is_locked = lock is not None
+
         if not occ:
-            seats.append({"seat_number": num, "state": "free", "next_free_stop": None, "next_free_stop_order": None})
+            seat_state = "locked" if is_locked else "free"
+            seats.append({
+                "seat_number": num,
+                "state": seat_state,
+                "is_locked": is_locked,
+                "lock_seconds_remaining": lock["seconds_remaining"] if lock else 0,
+                "next_free_stop": None,
+                "next_free_stop_order": None,
+            })
             continue
         state, free_at = classify(occ)
         if state == "partial" and free_at is not None:
@@ -3366,12 +3754,21 @@ async def get_seat_map(trip_id: int, board_order: int = 1, alight_order: int = 2
                 free_name = stop_name_row
             seats.append({
                 "seat_number": num,
-                "state": "partial",
+                "state": "locked" if is_locked else "partial",
+                "is_locked": is_locked,
+                "lock_seconds_remaining": lock["seconds_remaining"] if lock else 0,
                 "next_free_stop": free_name,
                 "next_free_stop_order": free_at["stop_order"],
             })
         else:
-            seats.append({"seat_number": num, "state": state, "next_free_stop": None, "next_free_stop_order": None})
+            seats.append({
+                "seat_number": num,
+                "state": "full",
+                "is_locked": is_locked,
+                "lock_seconds_remaining": lock["seconds_remaining"] if lock else 0,
+                "next_free_stop": None,
+                "next_free_stop_order": None,
+            })
 
     return {
         "trip_id": trip_id,
@@ -3379,7 +3776,107 @@ async def get_seat_map(trip_id: int, board_order: int = 1, alight_order: int = 2
         "alight_order": alight_order,
         "seat_capacity": capacity,
         "seats": seats,
+        "active_locks_count": len(active_locks),
     }
+
+
+class SeatLockRequest(BaseModel):
+    board_stop_order: int
+    alight_stop_order: int
+    ttl_seconds: Optional[int] = 420
+
+
+@app.post("/api/trips/{trip_id}/seats/{seat_number}/lock")
+async def acquire_seat_lock(
+    trip_id: int,
+    seat_number: int,
+    payload: SeatLockRequest,
+    db=Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Temporarily reserve/lock a seat for 5-7 minutes during checkout to avoid double bookings."""
+    trip = (await db.execute(
+        text("SELECT id FROM trips WHERE id = :id;"), {"id": trip_id}
+    )).mappings().first()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+
+    # Check database occupancy for this segment
+    overlap = (await db.execute(
+        text("""
+            SELECT id FROM bookings
+            WHERE trip_id = :trip_id AND seat_number = :seat_number AND status != 'cancelled'
+              AND NOT (alight_stop_order <= :bo OR board_stop_order >= :ao)
+            LIMIT 1;
+        """),
+        {"trip_id": trip_id, "seat_number": seat_number, "bo": payload.board_stop_order, "ao": payload.alight_stop_order}
+    )).first()
+    if overlap:
+        raise HTTPException(status_code=409, detail=f"Seat {seat_number} is already booked for this route segment.")
+
+    ttl = payload.ttl_seconds or 420
+    ok, lock_obj, message = await seat_lock_manager.acquire_lock(
+        trip_id=trip_id,
+        seat_number=seat_number,
+        user_id=current_user.id,
+        board_order=payload.board_stop_order,
+        alight_order=payload.alight_stop_order,
+        ttl_seconds=ttl,
+    )
+    if not ok:
+        raise HTTPException(status_code=409, detail=message)
+
+    # Broadcast seat lock event so concurrent users see it instantaneously
+    await manager.broadcast_trip(trip_id, {
+        "event": "seat_locked",
+        "trip_id": trip_id,
+        "seat_number": seat_number,
+        "user_id": current_user.id,
+        "board_stop_order": payload.board_stop_order,
+        "alight_stop_order": payload.alight_stop_order,
+        "seconds_remaining": lock_obj.seconds_remaining if lock_obj else ttl,
+    })
+
+    return {
+        "status": "locked",
+        "trip_id": trip_id,
+        "seat_number": seat_number,
+        "lock": lock_obj.to_dict() if lock_obj else None,
+        "message": message,
+    }
+
+
+@app.post("/api/trips/{trip_id}/seats/{seat_number}/unlock")
+async def release_seat_lock(
+    trip_id: int,
+    seat_number: int,
+    db=Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Release a held seat reservation lock."""
+    released = await seat_lock_manager.release_lock(trip_id, seat_number, user_id=current_user.id)
+    if released:
+        await manager.broadcast_trip(trip_id, {
+            "event": "seat_unlocked",
+            "trip_id": trip_id,
+            "seat_number": seat_number,
+            "user_id": current_user.id,
+            "reason": "user_cancelled",
+        })
+    return {"status": "unlocked", "released": released}
+
+
+@app.get("/api/trips/{trip_id}/locks")
+async def list_seat_locks(
+    trip_id: int,
+    board_order: Optional[int] = None,
+    alight_order: Optional[int] = None,
+    db=Depends(get_async_db),
+):
+    """Get active locks for a trip."""
+    locks = await seat_lock_manager.get_locks_for_trip(trip_id, board_order, alight_order)
+    return {"trip_id": trip_id, "active_locks": locks}
+
 
 
 # --------------------------------------------------------------------------

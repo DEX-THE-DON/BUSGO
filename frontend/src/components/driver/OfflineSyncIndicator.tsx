@@ -6,11 +6,12 @@ import {
   getCachedManifest,
   getPendingScans,
   syncOfflineScans,
+  markScanSynced,
   CachedTripManifest,
   PendingOfflineScan,
   OfflinePassenger,
 } from '@/lib/offlineStore';
-import { boardPassenger, ManifestEntry, TripRow } from '@/services/api';
+import { boardPassenger, batchOfflineSync, ManifestEntry, TripRow } from '@/services/api';
 
 interface OfflineSyncIndicatorProps {
   tripId: number;
@@ -99,7 +100,7 @@ export default function OfflineSyncIndicator({
       );
 
       await refreshCacheInfo();
-      setSyncMessage(`✓ Successfully cached Trip #${tripId} (${manifest.length} passengers) for offline highway travel.`);
+      setSyncMessage(`✓ Manifest Pre-Downloaded! Trip #${tripId} (${manifest.length} passengers) cached for offline dead zones.`);
       setTimeout(() => setSyncMessage(''), 5000);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -109,23 +110,51 @@ export default function OfflineSyncIndicator({
     }
   };
 
-  // Sync queued scans back to server
+  // Sync queued scans back to server using high-speed deterministic batch sync
   const handleSyncScans = async () => {
     if (!tripId || pendingScans.length === 0 || isSyncing) return;
     setIsSyncing(true);
     setSyncMessage('');
     try {
-      const result = await syncOfflineScans(tripId, async (tId, body) => {
-        return await boardPassenger(tId, body);
-      });
+      let syncedCount = 0;
+      let failedCount = 0;
+      const errors: string[] = [];
+
+      try {
+        const batchPayload = pendingScans.map((s) => ({
+          booking_id: s.bookingId,
+          ticket_code: s.ticketCode,
+          seat_number: s.seatNumber,
+          scanned_at: s.scannedAt,
+        }));
+        const batchRes = await batchOfflineSync(tripId, batchPayload);
+        for (const s of pendingScans) {
+          if (s.id != null) await markScanSynced(s.id);
+        }
+        syncedCount = batchRes.boarded_count + batchRes.already_boarded_count;
+        failedCount = batchRes.conflict_count;
+        if (batchRes.results) {
+          batchRes.results
+            .filter((r) => r.status === 'conflict_cancelled')
+            .forEach((r) => errors.push(`Seat #${r.seat_number}: ticket cancelled`));
+        }
+      } catch {
+        // Fallback to per-scan sync
+        const result = await syncOfflineScans(tripId, async (tId, body) => {
+          return await boardPassenger(tId, body);
+        });
+        syncedCount = result.syncedCount;
+        failedCount = result.failedCount;
+        errors.push(...result.errors);
+      }
 
       await refreshCacheInfo();
       if (onSyncComplete) onSyncComplete();
 
-      if (result.errors.length > 0) {
-        setSyncMessage(`⚠️ Synced ${result.syncedCount} scans. ${result.failedCount} failed (${result.errors.join('; ')}).`);
+      if (errors.length > 0) {
+        setSyncMessage(`⚠️ Synced ${syncedCount} scans. ${failedCount} conflicts (${errors.join('; ')}).`);
       } else {
-        setSyncMessage(`✓ All ${result.syncedCount} queued highway scans synced successfully to cloud!`);
+        setSyncMessage(`✓ All ${syncedCount} queued highway scans synced successfully to cloud!`);
       }
       setTimeout(() => setSyncMessage(''), 6000);
     } catch (err: unknown) {

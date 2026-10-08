@@ -28,6 +28,7 @@ from backend.chains import (
     create_notification,
 )
 from backend import dispatch
+from backend import reconciliation
 
 logger = logging.getLogger("busgo.crons")
 logger.setLevel(logging.INFO)
@@ -39,6 +40,8 @@ CRON_STATS: Dict[str, Any] = {
     "last_run": None,
     "runs_count": 0,
     "total_swept_bookings": 0,
+    "total_reconciled_confirmed": 0,
+    "total_reconciled_refunded": 0,
     "total_expired_waitlists": 0,
     "total_completed_trips": 0,
     "total_reminders_dispatched": 0,
@@ -52,7 +55,8 @@ _cron_task: Optional[asyncio.Task] = None
 async def sweep_expired_pending_bookings(db: AsyncSession, max_age_minutes: int = 5) -> Dict[str, Any]:
     """
     Cancel pending reservations where the user failed to complete payment within max_age_minutes.
-    Re-opens the corridor seat chain and informs waitlisted candidates.
+    Before cancelling, actively queries Daraja/Paystack gateway to guarantee that delayed
+    callbacks do NOT lead to stranded payments or false cancellations.
     """
     query = text(f"""
         SELECT b.id, b.trip_id, b.seat_number, b.board_stop_order, b.alight_stop_order,
@@ -68,6 +72,8 @@ async def sweep_expired_pending_bookings(db: AsyncSession, max_age_minutes: int 
     expired_bookings = [dict(r) for r in result.mappings().all()]
 
     swept_ids: List[int] = []
+    reconciled_confirmed_ids: List[int] = []
+    reconciled_refund_ids: List[int] = []
 
     for b in expired_bookings:
         b_id = b["id"]
@@ -76,13 +82,32 @@ async def sweep_expired_pending_bookings(db: AsyncSession, max_age_minutes: int 
         user_id = b["user_id"]
         trip_name = b["trip_name"] or f"Trip #{trip_id}"
 
-        # 1. Update booking status
+        # 1. Actively query payment gateway before blindly cancelling
+        try:
+            recon = await reconciliation.reconcile_booking_payment(db, b_id)
+            action = recon.get("action")
+            if action in ("confirmed", "resurrected_and_confirmed"):
+                reconciled_confirmed_ids.append(b_id)
+                CRON_STATS["total_reconciled_confirmed"] = CRON_STATS.get("total_reconciled_confirmed", 0) + 1
+                logger.info(f"[CRON] Reconciled and auto-confirmed pending booking #{b_id} (Receipt: {recon.get('receipt_number')})")
+                continue
+            elif action == "refund_queued":
+                reconciled_refund_ids.append(b_id)
+                CRON_STATS["total_reconciled_refunded"] = CRON_STATS.get("total_reconciled_refunded", 0) + 1
+                logger.warning(f"[CRON] Booking #{b_id} was paid late; seat was taken, refund reversal queued.")
+                continue
+            elif action == "cancelled_due_to_gateway":
+                swept_ids.append(b_id)
+                continue
+        except Exception as e:
+            logger.warning(f"[CRON] Active payment gateway check failed for #{b_id}: {e}")
+
+        # 2. Fallback: Safe cancellation if no payment was made
         await db.execute(
             text("UPDATE bookings SET status = 'cancelled', payment_status = 'unpaid' WHERE id = :id;"),
             {"id": b_id}
         )
 
-        # 2. Mark any initiated payments as failed/expired
         await db.execute(
             text("""
                 UPDATE payments
@@ -93,7 +118,6 @@ async def sweep_expired_pending_bookings(db: AsyncSession, max_age_minutes: int 
             {"bid": b_id}
         )
 
-        # Commit cancellation so chain recompute reads updated state
         await db.commit()
 
         # 3. Recompute chain & notify waitlist for freed corridor gap
@@ -117,17 +141,21 @@ async def sweep_expired_pending_bookings(db: AsyncSession, max_age_minutes: int 
                 user_id,
                 "booking_expired",
                 "Reservation Expired",
-                f"Your 5-minute reservation for Seat #{seat_num} on {trip_name} expired before payment. The seat has been released.",
+                f"Your reservation for Seat #{seat_num} on {trip_name} expired before payment. The seat has been released.",
                 {"trip_id": trip_id, "seat_number": seat_num, "booking_id": b_id},
             )
             await db.commit()
 
         swept_ids.append(b_id)
-        logger.info(f"[CRON] Swept expired booking #{b_id} (Trip #{trip_id}, Seat #{seat_num})")
+        logger.info(f"[CRON] Swept uncompleted booking #{b_id} (Trip #{trip_id}, Seat #{seat_num})")
 
     return {
         "swept_count": len(swept_ids),
         "swept_booking_ids": swept_ids,
+        "reconciled_confirmed_count": len(reconciled_confirmed_ids),
+        "reconciled_confirmed_ids": reconciled_confirmed_ids,
+        "reconciled_refund_count": len(reconciled_refund_ids),
+        "reconciled_refund_ids": reconciled_refund_ids,
     }
 
 
@@ -288,8 +316,22 @@ async def run_all_crons(db: AsyncSession) -> Dict[str, Any]:
     """
     global CRON_STATS
 
+    from backend.locks import seat_lock_manager
+    expired_locks = await seat_lock_manager.sweep_and_get_expired()
+    for l in expired_locks:
+        try:
+            await manager.broadcast_trip(l.trip_id, {
+                "event": "seat_unlocked",
+                "trip_id": l.trip_id,
+                "seat_number": l.seat_number,
+                "reason": "lock_expired",
+            })
+        except Exception as e:
+            logger.warning(f"Error broadcasting seat unlock for trip {l.trip_id}: {e}")
+
     results = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "expired_seat_locks": len(expired_locks),
         "pending_sweeper": await sweep_expired_pending_bookings(db),
         "waitlist_sweeper": await sweep_expired_waitlist_windows(db),
         "trip_completer": await auto_complete_arrived_trips(db),

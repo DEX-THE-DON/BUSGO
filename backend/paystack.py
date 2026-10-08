@@ -26,7 +26,7 @@ async def initialize_transaction(
     callback_url: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """
+    """Initialize a Paystack checkout transaction."""
     if not is_configured():
         return {
             "authorization_url": f"https://checkout.paystack.com/simulate-{reference}",

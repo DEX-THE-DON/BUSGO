@@ -130,3 +130,39 @@ def parse_callback(body: dict) -> Optional[dict]:
         }
     except (KeyError, TypeError, AttributeError):
         return None
+
+
+async def query_stk_status(checkout_request_id: str) -> dict:
+    """
+    Active Daraja STK Push Query API (M-Pesa Express Query).
+    Queries Safaricom's status of an STK transaction to reconcile delayed or lost callbacks.
+    Endpoint: POST /mpesa/stkpushquery/v1/query
+    """
+    if not configured():
+        # Simulated response for local test suites & offline developer environments
+        return {
+            "ResponseCode": "0",
+            "ResponseDescription": "Simulated query response",
+            "CheckoutRequestID": checkout_request_id,
+            "ResultCode": 0,
+            "ResultDesc": "The service request is processed successfully (Simulated).",
+            "simulated": True,
+        }
+
+    token = await get_access_token()
+    password, timestamp = _stk_password()
+    payload = {
+        "BusinessShortCode": SHORTCODE,
+        "Password": password,
+        "Timestamp": timestamp,
+        "CheckoutRequestID": checkout_request_id,
+    }
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(
+            f"{BASE_URL}/mpesa/stkpushquery/v1/query",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()

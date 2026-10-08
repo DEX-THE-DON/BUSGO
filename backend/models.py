@@ -524,6 +524,32 @@ class LostFoundItem(Base):
     sacco = relationship('Sacco')
 
 
+class AuditLog(Base):
+    """
+    Immutable audit trail for high-risk operations (ticket cancellations, overrides, fare modifications).
+    Enforces accountability against clerk fraud and unauthorized cash operations.
+    """
+    __tablename__ = 'audit_logs'
+
+    id = Column(Integer, primary_key=True, index=True)
+    action = Column(String, nullable=False)          # 'booking_cancellation', 'seat_override', 'refund_issued'
+    entity_type = Column(String, nullable=False)     # 'booking', 'trip', 'payment'
+    entity_id = Column(Integer, nullable=False)
+    actor_user_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    actor_role = Column(String, nullable=False)       # 'admin' | 'sacco_admin' | 'driver' | 'user'
+    supervisor_pin_verified = Column(Boolean, nullable=False, default=False)
+    supervisor_user_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    previous_state = Column(JSON, nullable=True)
+    new_state = Column(JSON, nullable=True)
+    reason = Column(Text, nullable=True)
+    ip_address = Column(String, nullable=True)
+    created_at = Column(TIMESTAMP(timezone=True), default=func.now())
+
+    actor = relationship('User', foreign_keys=[actor_user_id])
+    supervisor = relationship('User', foreign_keys=[supervisor_user_id])
+
+
+
 
 
 

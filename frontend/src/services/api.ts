@@ -452,6 +452,34 @@ export async function boardPassenger(tripId: number, payload: BoardPassengerPayl
   });
 }
 
+export interface OfflineSyncItemPayload {
+  booking_id?: number;
+  ticket_code?: string;
+  seat_number?: number;
+  scanned_at?: string;
+}
+
+export async function batchOfflineSync(tripId: number, scans: OfflineSyncItemPayload[]) {
+  return apiFetch<{
+    ok: boolean;
+    trip_id: number;
+    total_scans: number;
+    boarded_count: number;
+    already_boarded_count: number;
+    conflict_count: number;
+    results: Array<{
+      booking_id?: number;
+      seat_number?: number;
+      status: string;
+      message?: string;
+    }>;
+  }>(`/api/trips/${tripId}/offline-sync`, {
+    method: 'POST',
+    body: JSON.stringify({ scans, synced_at: new Date().toISOString() }),
+  });
+}
+
+
 
 // ---------------------------------------------------------------------------
 // Seat map, chains, waitlist & notifications (the relay feature)
