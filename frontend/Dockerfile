@@ -60,3 +60,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 
 WORKDIR /app/frontend
 CMD ["npx", "next", "start", "-p", "3000", "-H", "0.0.0.0"]
+
