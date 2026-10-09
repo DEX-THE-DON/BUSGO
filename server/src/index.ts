@@ -87,7 +87,7 @@ app.get('/progress', async (_request, reply) => {
 app.get('/ws/trip/:trip_id', { websocket: true }, (socket, req) => {
   const tripId = Number((req.params as { trip_id?: string }).trip_id);
   manager.connectTrip(socket, tripId);
-  socket.on('message', (data) => {
+  socket.on('message', (data: any) => {
     const text = typeof data === 'string' ? data : data.toString();
     manager.broadcastTrip(tripId, { message: text });
   });

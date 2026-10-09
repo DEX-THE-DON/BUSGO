@@ -18,7 +18,6 @@
   },
   "version": "1.0.0",
   "description": "A transit booking system for Kenya's bus/matatu fleet with **dynamic partial-segment seating**: the same physical seat can be sold to multiple passengers for *non-overlapping legs* of the same trip — and each seat is modelled as a **relay chain** (A→B 🔗 B→C 🔗 C→D) so passengers are notified when the seat frees up at their stop. Overlap conflicts are prevented at the database level by a Postgres trigger, so double-booking is impossible even under concurrent requests.",
-  "main": "index.js",
   "dependencies": {
     "@fastify/websocket": "^11.3.0",
     "abstract-logging": "^2.0.1",
