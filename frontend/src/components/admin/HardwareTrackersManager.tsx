@@ -868,3 +868,4 @@ export default function HardwareTrackersManager({
     </div>
   );
 }
+

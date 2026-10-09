@@ -41,6 +41,7 @@ from backend import dispatch
 from backend import crons
 from backend import reconciliation
 from backend import telemetry_listener
+from backend import escpos
 from backend.telemetry_listener import (
     HardwareTelemetryTCPServer,
     process_telemetry_point,
@@ -2710,6 +2711,125 @@ async def get_booking_dispatch_preview(
         "preview": preview,
         "history": [dict(d) for d in disp_rows],
     }
+
+
+@app.get("/api/bookings/{booking_id}/escpos")
+async def get_booking_escpos_slip(
+    booking_id: int,
+    width: int = 58,
+    output: str = "base64",
+    db=Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Handheld Thermal POS: Generate ESC/POS byte stream for passenger ticket slip."""
+    query = text("""
+        SELECT
+            b.id, b.trip_id, b.seat_number, b.board_stop_order, b.alight_stop_order,
+            b.status, b.payment_status, b.user_id, b.has_luggage, b.luggage_count, b.luggage_fee,
+            u.full_name AS passenger_name, u.phone AS passenger_phone,
+            t.name AS trip_name, t.scheduled_at AS departure_time,
+            t.fixed_price,
+            r.name AS route_name, r.base_fare,
+            v.plate_number AS vehicle_plate,
+            s.name AS sacco_name,
+            p.receipt_number, p.amount AS payment_amount
+        FROM bookings b
+        JOIN trips t ON t.id = b.trip_id
+        JOIN routes r ON r.id = t.route_id
+        LEFT JOIN users u ON u.id = b.user_id
+        LEFT JOIN vehicles v ON v.id = t.vehicle_id
+        LEFT JOIN saccos s ON s.id = v.sacco_id
+        LEFT JOIN payments p ON p.booking_id = b.id
+        WHERE b.id = :id;
+    """)
+    row = (await db.execute(query, {"id": booking_id})).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Booking not found.")
+
+    b_dict = dict(row)
+    stops_res = await db.execute(
+        text("""
+            SELECT stop_name, stop_order
+            FROM route_stops rs
+            JOIN trips t ON t.route_id = rs.route_id
+            WHERE t.id = :tid
+            ORDER BY rs.stop_order ASC;
+        """),
+        {"tid": b_dict.get("trip_id")},
+    )
+    stop_map = {s["stop_order"]: s["stop_name"] for s in stops_res.mappings().all()}
+    b_dict["board_stop"] = stop_map.get(b_dict.get("board_stop_order"), f"Stop #{b_dict.get('board_stop_order')}")
+    b_dict["alight_stop"] = stop_map.get(b_dict.get("alight_stop_order"), f"Stop #{b_dict.get('alight_stop_order')}")
+
+    ticket_payload = {
+        "booking_id": b_dict["id"],
+        "seat_number": b_dict["seat_number"],
+        "passenger_name": b_dict["passenger_name"],
+        "passenger_phone": b_dict["passenger_phone"],
+        "sacco_name": b_dict.get("sacco_name") or "BUSGO TRANSIT SACCO",
+        "route_name": b_dict.get("route_name"),
+        "board_stop": b_dict["board_stop"],
+        "alight_stop": b_dict["alight_stop"],
+        "vehicle_plate": b_dict.get("vehicle_plate"),
+        "departure_time": b_dict.get("departure_time"),
+        "fare_amount": float(b_dict.get("payment_amount") or b_dict.get("fixed_price") or b_dict.get("base_fare") or 500.0),
+        "luggage_fee": float(b_dict.get("luggage_fee") or 0.0),
+        "receipt_number": b_dict.get("receipt_number"),
+    }
+
+    raw_bytes = escpos.generate_passenger_ticket_escpos(ticket_payload, width_mm=width)
+    ascii_slip = escpos.generate_plain_ascii_slip(ticket_payload, width_mm=width)
+
+    if output == "binary":
+        from fastapi.responses import Response
+        return Response(
+            content=raw_bytes,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f"attachment; filename=ticket_BG{booking_id}_{width}mm.bin"}
+        )
+
+    return {
+        "ok": True,
+        "booking_id": booking_id,
+        "width_mm": width,
+        "base64": base64.b64encode(raw_bytes).decode('ascii'),
+        "ascii_preview": ascii_slip,
+        "ticket": ticket_payload,
+    }
+
+
+@app.get("/api/parcels/{parcel_id}/escpos")
+async def get_parcel_escpos_slip(
+    parcel_id: int,
+    width: int = 58,
+    output: str = "base64",
+    db=Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Handheld Thermal POS: Generate ESC/POS waybill receipt for Mzigo courier."""
+    p_row = (await db.execute(text("SELECT * FROM parcels WHERE id = :id;"), {"id": parcel_id})).mappings().first()
+    if not p_row:
+        raise HTTPException(status_code=404, detail="Parcel not found.")
+
+    parcel_dict = dict(p_row)
+    raw_bytes = escpos.generate_parcel_waybill_escpos(parcel_dict, width_mm=width)
+
+    if output == "binary":
+        from fastapi.responses import Response
+        return Response(
+            content=raw_bytes,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f"attachment; filename=waybill_P{parcel_id}_{width}mm.bin"}
+        )
+
+    return {
+        "ok": True,
+        "parcel_id": parcel_id,
+        "width_mm": width,
+        "base64": base64.b64encode(raw_bytes).decode('ascii'),
+        "parcel": parcel_dict,
+    }
+
 
 
 @app.post("/api/bookings/{booking_id}/reconcile")

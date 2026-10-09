@@ -1702,6 +1702,40 @@ export async function ingestHardwareHexFrame(
   });
 }
 
+// ---------------------------------------------------------------------------
+// 8. Handheld Thermal POS Bluetooth Slip Printing (ESC/POS)
+// ---------------------------------------------------------------------------
+
+export async function fetchBookingEscPosSlip(
+  bookingId: number,
+  widthMm: 58 | 80 = 58,
+  output: 'base64' | 'ascii' | 'binary' = 'base64'
+): Promise<{
+  ok: boolean;
+  booking_id: number;
+  width_mm: number;
+  base64?: string;
+  ascii_preview?: string;
+  ticket?: any;
+}> {
+  return apiFetch(`/api/bookings/${bookingId}/escpos?width=${widthMm}&output=${output}`);
+}
+
+export async function fetchParcelEscPosSlip(
+  parcelId: number,
+  widthMm: 58 | 80 = 58,
+  output: 'base64' | 'ascii' | 'binary' = 'base64'
+): Promise<{
+  ok: boolean;
+  parcel_id: number;
+  width_mm: number;
+  base64?: string;
+  parcel?: any;
+}> {
+  return apiFetch(`/api/parcels/${parcelId}/escpos?width=${widthMm}&output=${output}`);
+}
+
+
 
 
 

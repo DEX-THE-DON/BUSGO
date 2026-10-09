@@ -1,6 +1,13 @@
 'use client';
 
 import React, { useState } from 'react';
+import {
+  buildEscPosTicketBytes,
+  connectBluetoothThermalPrinter,
+  sendEscPosToPrinter,
+  downloadRawEscPosFile,
+  isWebBluetoothSupported,
+} from '@/lib/escpos';
 
 export interface TicketData {
   bookingId: number;
@@ -38,7 +45,11 @@ export default function PrintableTicketModal({
   defaultFormat = 'a4',
 }: PrintableTicketModalProps) {
   const [format, setFormat] = useState<'a4' | 'thermal'>(defaultFormat);
+  const [rollWidth, setRollWidth] = useState<58 | 80>(58);
   const [copied, setCopied] = useState(false);
+  const [btStatus, setBtStatus] = useState<'idle' | 'connecting' | 'printing' | 'success' | 'error'>('idle');
+  const [btDeviceName, setBtDeviceName] = useState<string | null>(null);
+  const [btError, setBtError] = useState<string>('');
 
   if (!isOpen) return null;
 
@@ -56,6 +67,28 @@ export default function PrintableTicketModal({
 
   const handlePrint = () => {
     window.print();
+  };
+
+  const handleBluetoothPrint = async () => {
+    setBtError('');
+    setBtStatus('connecting');
+    try {
+      const devName = await connectBluetoothThermalPrinter();
+      setBtDeviceName(devName);
+      setBtStatus('printing');
+      const bytes = buildEscPosTicketBytes(ticket, rollWidth);
+      await sendEscPosToPrinter(bytes);
+      setBtStatus('success');
+      setTimeout(() => setBtStatus('idle'), 3500);
+    } catch (err: any) {
+      setBtStatus('error');
+      setBtError(err?.message || 'Bluetooth printing failed. Ensure printer is on and in pairing range.');
+    }
+  };
+
+  const handleDownloadBin = () => {
+    const bytes = buildEscPosTicketBytes(ticket, rollWidth);
+    downloadRawEscPosFile(bytes, `ticket_BG${ticket.bookingId}_${rollWidth}mm.bin`);
   };
 
   const generateAsciiReceipt = () => {
@@ -130,7 +163,7 @@ SAFARI NJEMA - TRAVEL SAFELY WITH BUSGO!
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              <span>📄 Standard A4 / PDF</span>
+              <span>📄 A4 PDF</span>
             </button>
             <button
               onClick={() => setFormat('thermal')}
@@ -140,7 +173,7 @@ SAFARI NJEMA - TRAVEL SAFELY WITH BUSGO!
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              <span>🧾 58mm Thermal POS</span>
+              <span>🧾 Thermal Slip</span>
             </button>
           </div>
 
@@ -155,9 +188,41 @@ SAFARI NJEMA - TRAVEL SAFELY WITH BUSGO!
 
         {/* Action Toolbar */}
         <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-3 bg-slate-950/60 border-b border-slate-800/60">
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Ready for instant printing or PDF download</span>
+          <div className="flex items-center gap-3 text-xs text-slate-400">
+            {format === 'thermal' ? (
+              <div className="flex items-center gap-1 bg-slate-900 px-2 py-1 rounded-lg border border-slate-800">
+                <span className="text-[11px] text-slate-400">Roll:</span>
+                <button
+                  type="button"
+                  onClick={() => setRollWidth(58)}
+                  className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
+                    rollWidth === 58 ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  58mm
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRollWidth(80)}
+                  className={`px-1.5 py-0.5 rounded text-[11px] font-bold ${
+                    rollWidth === 80 ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  80mm
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span>Ready for instant printing or PDF download</span>
+              </div>
+            )}
+            {btDeviceName && (
+              <span className="text-[11px] text-emerald-400 font-mono flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                {btDeviceName}
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -166,18 +231,60 @@ SAFARI NJEMA - TRAVEL SAFELY WITH BUSGO!
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-200 text-xs font-bold transition shadow"
             >
               <span>{copied ? '✓' : '📋'}</span>
-              <span>{copied ? 'Receipt Copied!' : 'Copy Text'}</span>
+              <span>{copied ? 'Copied!' : 'Copy Text'}</span>
             </button>
+
+            {format === 'thermal' && (
+              <>
+                <button
+                  onClick={handleDownloadBin}
+                  title="Download raw ESC/POS binary file for terminal spooler"
+                  className="px-2.5 py-1.5 rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-xs font-mono transition"
+                >
+                  ⬇ .bin
+                </button>
+
+                <button
+                  onClick={handleBluetoothPrint}
+                  disabled={btStatus === 'connecting' || btStatus === 'printing'}
+                  className={`flex items-center gap-1.5 px-4 py-1.5 rounded-xl font-bold text-xs shadow-lg transition cursor-pointer ${
+                    btStatus === 'success'
+                      ? 'bg-emerald-600 text-white'
+                      : btStatus === 'error'
+                      ? 'bg-rose-600 text-white'
+                      : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-purple-900/30'
+                  }`}
+                >
+                  <span>{btStatus === 'connecting' ? '📡' : btStatus === 'printing' ? '⏳' : btStatus === 'success' ? '✓' : '📱'}</span>
+                  <span>
+                    {btStatus === 'connecting'
+                      ? 'Pairing BT...'
+                      : btStatus === 'printing'
+                      ? 'Printing Slip...'
+                      : btStatus === 'success'
+                      ? 'Printed!'
+                      : 'Bluetooth POS Print'}
+                  </span>
+                </button>
+              </>
+            )}
 
             <button
               onClick={handlePrint}
               className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black shadow-lg shadow-emerald-900/30 transition cursor-pointer"
             >
               <span>🖨️</span>
-              <span>{format === 'a4' ? 'Print / Save PDF' : 'Print Thermal Receipt'}</span>
+              <span>{format === 'a4' ? 'Print / Save PDF' : 'Browser Print'}</span>
             </button>
           </div>
         </div>
+
+        {btError && (
+          <div className="bg-rose-500/10 border-b border-rose-500/30 text-rose-400 text-xs px-6 py-2 flex justify-between items-center">
+            <span>{btError}</span>
+            <button onClick={() => setBtError('')} className="underline hover:text-white">✕</button>
+          </div>
+        )}
 
         {/* Preview Container */}
         <div className="p-6 max-h-[70vh] overflow-y-auto bg-[#070a12] flex justify-center">
@@ -330,7 +437,7 @@ SAFARI NJEMA - TRAVEL SAFELY WITH BUSGO!
             /* ===============================================================
                58mm / 80mm Handheld Stage Thermal POS Receipt Preview
                =============================================================== */
-            <div className="bg-white text-black p-4 rounded shadow-2xl border border-slate-300 font-mono text-[11px] leading-tight w-[280px] select-text thermal-receipt-document">
+            <div className={`bg-white text-black p-4 rounded shadow-2xl border border-slate-300 font-mono text-[11px] leading-tight ${rollWidth === 80 ? 'w-[360px]' : 'w-[280px]'} select-text thermal-receipt-document`}>
               <div className="text-center">
                 <p className="text-sm font-black tracking-tighter">*** BUSGO TRANSIT ***</p>
                 <p className="text-[10px]">P.O. BOX 10444 - NAIROBI</p>
