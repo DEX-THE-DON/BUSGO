@@ -634,3 +634,4 @@ export default function UssdManager() {
     </div>
   );
 }
+

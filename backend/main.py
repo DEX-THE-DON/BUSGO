@@ -1016,6 +1016,16 @@ def read_root():
     return {"message": "Welcome to BUSGO API - Dynamic Transport & Seating Platform"}
 
 
+@app.get("/api/health")
+def healthcheck():
+    return {
+        "status": "healthy",
+        "service": "busgo-backend",
+        "version": "1.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @app.get("/progress", response_class=HTMLResponse)
 def progress_page():
     return """

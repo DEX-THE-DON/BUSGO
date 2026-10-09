@@ -345,3 +345,4 @@ def generate_plain_ascii_slip(ticket: Dict[str, Any], width_mm: int = 58) -> str
     lines.append(center_text("Retain ticket until alight.", cols))
 
     return "\n".join(lines)
+

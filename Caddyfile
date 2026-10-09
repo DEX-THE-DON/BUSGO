@@ -1,0 +1,47 @@
+{
+    # Global Caddy settings
+    email {$ACME_EMAIL:admin@busgo.co.ke}
+    admin off
+}
+
+# Domain or localhost fallback
+{$APP_DOMAIN:localhost} {
+    # Modern wire-speed compression
+    encode gzip zstd
+
+    # Real-time WebSocket Upstream to FastAPI
+    @websockets {
+        header Connection *Upgrade*
+        header Upgrade websocket
+        path /ws/*
+    }
+    reverse_proxy @websockets backend:8000
+
+    # Route API, USSD (*384#) Webhook & ESC/POS endpoints to Python backend
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Route All Web Pages & Static Assets to Next.js Frontend
+    handle {
+        reverse_proxy frontend:3000 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Production Transport Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+}

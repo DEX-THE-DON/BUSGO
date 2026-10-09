@@ -1,0 +1,128 @@
+# =====================================================================
+# BUSGO Production Multi-Container Orchestration (Docker Compose)
+# =====================================================================
+# Services:
+#   1. postgres: PostgreSQL 16 Alpine with persistent data volume & healthcheck
+#   2. backend:  FastAPI + Uvicorn + Teltonika/Concox GPS TCP Telemetry servers
+#   3. frontend: Next.js 16 Production SSR container
+#   4. proxy:    Caddy 2 with automatic Let's Encrypt TLS & WebSocket upgrades
+# =====================================================================
+
+version: '3.8'
+
+services:
+  # -------------------------------------------------------------------
+  # 1. PostgreSQL Database Service
+  # -------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: busgo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-busgo_production_secret_2026}
+      POSTGRES_DB: ${POSTGRES_DB:-busgo_db}
+    volumes:
+      - busgo_pgdata:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-busgo_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - busgo-network
+
+  # -------------------------------------------------------------------
+  # 2. Python FastAPI Backend & Hardware GPS Listeners
+  # -------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: busgo-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-busgo_production_secret_2026}@postgres:5432/${POSTGRES_DB:-busgo_db}
+      SECRET_KEY: ${SECRET_KEY:-busgo_jwt_secret_token_key_change_in_production}
+      # M-Pesa Daraja STK Push & B2C Payouts
+      MPESA_ENV: ${MPESA_ENV:-sandbox}
+      MPESA_CONSUMER_KEY: ${MPESA_CONSUMER_KEY:-}
+      MPESA_CONSUMER_SECRET: ${MPESA_CONSUMER_SECRET:-}
+      MPESA_PASSKEY: ${MPESA_PASSKEY:-}
+      MPESA_SHORTCODE: ${MPESA_SHORTCODE:-174379}
+      MPESA_CALLBACK_URL: ${MPESA_CALLBACK_URL:-https://${APP_DOMAIN:-localhost}/api/pay/daraja/callback}
+      # Africa's Talking USSD & SMS
+      AT_USERNAME: ${AT_USERNAME:-sandbox}
+      AT_API_KEY: ${AT_API_KEY:-}
+      AT_SENDER_ID: ${AT_SENDER_ID:-BUSGO}
+      FRONTEND_URL: https://${APP_DOMAIN:-localhost}
+    ports:
+      - "8000:8000"   # HTTP REST API & WebSockets
+      - "5027:5027"   # Teltonika GPS Telemetry TCP Listener
+      - "5023:5023"   # Concox GT06 GPS Telemetry TCP Listener
+    networks:
+      - busgo-network
+
+  # -------------------------------------------------------------------
+  # 3. Next.js 16 Production Frontend
+  # -------------------------------------------------------------------
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: busgo-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    networks:
+      - busgo-network
+
+  # -------------------------------------------------------------------
+  # 4. Caddy Auto-HTTPS Edge Reverse Proxy
+  # -------------------------------------------------------------------
+  proxy:
+    image: caddy:2.8-alpine
+    container_name: busgo-proxy
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:-localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@busgo.co.ke}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"       # HTTP (redirects to HTTPS automatically)
+      - "443:443"     # HTTPS (TLS 1.3)
+      - "443:443/udp" # HTTP/3 (QUIC)
+    networks:
+      - busgo-network
+
+# ---------------------------------------------------------------------
+# Named Persistent Storage Volumes & Virtual Network
+# ---------------------------------------------------------------------
+volumes:
+  busgo_pgdata:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+
+networks:
+  busgo-network:
+    driver: bridge
