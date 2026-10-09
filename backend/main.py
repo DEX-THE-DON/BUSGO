@@ -42,6 +42,7 @@ from backend import crons
 from backend import reconciliation
 from backend import telemetry_listener
 from backend import escpos
+from backend import ussd
 from backend.telemetry_listener import (
     HardwareTelemetryTCPServer,
     process_telemetry_point,
@@ -80,6 +81,8 @@ from backend.models import (
     LostFoundItem,
     AuditLog,
     TravelVoucher,
+    UssdSession,
+    UssdLog,
 )
 
 app = FastAPI(title="BUSGO API", version="1.0.0")
@@ -8936,6 +8939,132 @@ async def check_blackspot_proximity(req: CheckProximityRequest):
         "alerts_count": len(active_alerts),
         "alerts": active_alerts
     }
+
+
+# =====================================================================
+# USSD (*384#) INTERFACE FOR NON-SMARTPHONE PASSENGERS
+# =====================================================================
+
+class UssdSimulateRequest(BaseModel):
+    sessionId: Optional[str] = None
+    phoneNumber: str
+    text: Optional[str] = ""
+    serviceCode: Optional[str] = "*384#"
+
+
+@app.post("/api/ussd")
+async def handle_ussd_webhook(request: Request, db: AsyncSession = Depends(get_async_db)):
+    """
+    Africa's Talking & Telco USSD Webhook Handler.
+    Standard Africa's Talking sends form-urlencoded:
+      - sessionId: String
+      - serviceCode: String
+      - phoneNumber: String
+      - text: String (e.g. "", "1", "1*2")
+    Returns plain text starting with 'CON ' or 'END '.
+    """
+    content_type = request.headers.get("content-type", "")
+    session_id = ""
+    phone_number = ""
+    text_param = ""
+    service_code = "*384#"
+
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+            session_id = body.get("sessionId") or str(uuid.uuid4())
+            phone_number = body.get("phoneNumber") or ""
+            text_param = body.get("text") or ""
+            service_code = body.get("serviceCode") or "*384#"
+        except Exception:
+            pass
+    else:
+        try:
+            form = await request.form()
+            session_id = form.get("sessionId") or str(uuid.uuid4())
+            phone_number = form.get("phoneNumber") or ""
+            text_param = form.get("text") or ""
+            service_code = form.get("serviceCode") or "*384#"
+        except Exception:
+            pass
+
+    if not phone_number:
+        return PlainTextResponse("END Invalid USSD request: Phone number missing.", media_type="text/plain")
+
+    result = await ussd.process_ussd_step(
+        db=db,
+        session_id=session_id,
+        phone_number=phone_number,
+        text=text_param,
+        service_code=service_code,
+    )
+    return PlainTextResponse(content=result["raw_response"], media_type="text/plain")
+
+
+@app.post("/api/ussd/simulate")
+async def simulate_ussd_turn(req: UssdSimulateRequest, db: AsyncSession = Depends(get_async_db)):
+    """
+    JSON simulator endpoint for testing feature phone USSD dial flows on web dashboard.
+    """
+    session_id = req.sessionId or f"sim_{uuid.uuid4().hex[:10]}"
+    result = await ussd.process_ussd_step(
+        db=db,
+        session_id=session_id,
+        phone_number=req.phoneNumber,
+        text=req.text or "",
+        service_code=req.serviceCode or "*384#",
+    )
+    return result
+
+
+@app.get("/api/ussd/sessions")
+async def get_ussd_sessions(limit: int = 50, db: AsyncSession = Depends(get_async_db)):
+    """Admin view of active and recent USSD sessions."""
+    rows = await db.execute(
+        select(UssdSession).order_by(UssdSession.updated_at.desc()).limit(limit)
+    )
+    sessions = rows.scalars().all()
+    return {
+        "count": len(sessions),
+        "sessions": [
+            {
+                "id": s.id,
+                "session_id": s.session_id,
+                "phone_number": s.phone_number,
+                "language": s.language,
+                "current_menu": s.current_menu,
+                "is_active": s.is_active,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+            }
+            for s in sessions
+        ],
+    }
+
+
+@app.get("/api/ussd/logs")
+async def get_ussd_logs(limit: int = 100, db: AsyncSession = Depends(get_async_db)):
+    """Admin audit logs of inbound USSD hops and generated responses."""
+    rows = await db.execute(
+        select(UssdLog).order_by(UssdLog.id.desc()).limit(limit)
+    )
+    logs = rows.scalars().all()
+    return {
+        "count": len(logs),
+        "logs": [
+            {
+                "id": l.id,
+                "session_id": l.session_id,
+                "phone_number": l.phone_number,
+                "input_text": l.input_text,
+                "menu_state": l.menu_state,
+                "response_text": l.response_text,
+                "created_at": l.created_at.isoformat() if l.created_at else None,
+            }
+            for l in logs
+        ],
+    }
+
 
 
 

@@ -614,8 +614,36 @@ class TravelVoucher(Base):
     original_booking = relationship('Booking', foreign_keys=[original_booking_id])
 
 
+class UssdSession(Base):
+    """
+    USSD interactive session persistence across multi-hop menu exchanges.
+    Tracks user phone number, language preference, current menu step,
+    and temporary transient booking payload before confirmation.
+    """
+    __tablename__ = 'ussd_sessions'
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, unique=True, nullable=False, index=True)
+    phone_number = Column(String, nullable=False, index=True)
+    language = Column(String, nullable=False, default='en')  # 'en' | 'sw'
+    current_menu = Column(String, nullable=False, default='MAIN_MENU')
+    session_data = Column(JSON, nullable=True)  # Stores {"route_id": 1, "trip_id": 2, ...}
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(TIMESTAMP(timezone=True), default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), default=func.now(), onupdate=func.now())
 
 
+class UssdLog(Base):
+    """
+    Comprehensive audit log for all inbound USSD hops from Africa's Talking / Telco aggregators.
+    """
+    __tablename__ = 'ussd_logs'
 
-
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, nullable=False, index=True)
+    phone_number = Column(String, nullable=False, index=True)
+    input_text = Column(String, nullable=True)
+    menu_state = Column(String, nullable=False)
+    response_text = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), default=func.now())
 

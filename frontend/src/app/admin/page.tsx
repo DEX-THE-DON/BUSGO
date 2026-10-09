@@ -62,6 +62,7 @@ import IncidentDispatcher from '@/components/admin/IncidentDispatcher';
 import SaccoSettlementManager from '@/components/admin/SaccoSettlementManager';
 import EvFleetDashboard from '@/components/admin/EvFleetDashboard';
 import HardwareTrackersManager from '@/components/admin/HardwareTrackersManager';
+import UssdManager from '@/components/admin/UssdManager';
 import dynamic from 'next/dynamic';
 
 const NationalFleetRadar = dynamic(() => import('@/components/radar/NationalFleetRadar'), {
@@ -82,6 +83,7 @@ type Tab =
   | 'analytics'
   | 'payments'
   | 'settlements'
+  | 'ussd'
   | 'crons'
   | 'saccos'
   | 'compliance'
@@ -367,6 +369,7 @@ export default function AdminDashboard() {
         { id: 'users', label: 'Passengers', icon: <IconUsers />, badge: users.length },
         { id: 'payments', label: 'Payments & M-Pesa', icon: <IconPayment />, badge: payments.length },
         { id: 'settlements', label: 'Treasury & Cashout', icon: <span className="text-base">💰</span> },
+        { id: 'ussd', label: 'USSD (*384#) Gateway', icon: <span className="text-base">📱</span> },
         { id: 'crons', label: 'Automations & Crons', icon: <IconZap /> },
       ],
     },
@@ -591,6 +594,8 @@ export default function AdminDashboard() {
             {tab === 'ev_fleet' && <EvFleetDashboard />}
 
             {tab === 'settlements' && <SaccoSettlementManager />}
+
+            {tab === 'ussd' && <UssdManager />}
 
             {tab === 'analytics' && <AnalyticsTab analytics={analytics} />}
 

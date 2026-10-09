@@ -1735,6 +1735,67 @@ export async function fetchParcelEscPosSlip(
   return apiFetch(`/api/parcels/${parcelId}/escpos?width=${widthMm}&output=${output}`);
 }
 
+// ---------------------------------------------------------------------------
+// 9. USSD (*384#) Interface for Non-Smartphone Passengers
+// ---------------------------------------------------------------------------
+
+export interface UssdSimulateResponse {
+  status: 'CON' | 'END';
+  raw_response: string;
+  message: string;
+  session_id: string;
+  phone_number: string;
+  inputs: string[];
+}
+
+export interface UssdSessionRecord {
+  id: number;
+  session_id: string;
+  phone_number: string;
+  language: string;
+  current_menu: string;
+  is_active: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface UssdLogRecord {
+  id: number;
+  session_id: string;
+  phone_number: string;
+  input_text: string | null;
+  menu_state: string;
+  response_text: string;
+  created_at: string | null;
+}
+
+export async function simulateUssdRequest(payload: {
+  sessionId?: string;
+  phoneNumber: string;
+  text?: string;
+  serviceCode?: string;
+}): Promise<UssdSimulateResponse> {
+  return apiFetch('/api/ussd/simulate', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchUssdSessions(limit: number = 50): Promise<{
+  count: number;
+  sessions: UssdSessionRecord[];
+}> {
+  return apiFetch(`/api/ussd/sessions?limit=${limit}`);
+}
+
+export async function fetchUssdLogs(limit: number = 100): Promise<{
+  count: number;
+  logs: UssdLogRecord[];
+}> {
+  return apiFetch(`/api/ussd/logs?limit=${limit}`);
+}
+
+
 
 
 
