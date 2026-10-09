@@ -1,0 +1,119 @@
+name: BUSGO Continuous Integration & Quality Gate
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -------------------------------------------------------------------
+  # 1. Backend Python Tests & Migration Checks
+  # -------------------------------------------------------------------
+  backend-ci:
+    name: Python Backend Test Suite & Health
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: DEX
+          POSTGRES_DB: busgo_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt pyyaml
+
+      - name: Syntax & Lint Verification
+        run: |
+          python -m py_compile backend/*.py backend/alembic/versions/*.py
+
+      - name: Execute Automated Regression Test Suites
+        env:
+          PYTHONPATH: .
+          DATABASE_URL: postgresql+asyncpg://postgres:DEX@localhost:5432/busgo_db
+        run: |
+          python scratch/test_item3_ntsa_sweeper.py
+          python scratch/test_item4_gps_telemetry.py
+          python scratch/test_item5_escpos_thermal.py
+          python scratch/test_item6_ussd.py
+          python scratch/test_item7_containerization.py
+
+  # -------------------------------------------------------------------
+  # 2. Monorepo TypeScript & Next.js Static Build Verification
+  # -------------------------------------------------------------------
+  frontend-ci:
+    name: Monorepo TypeScript & Next.js Production Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Monorepo Dependencies
+        run: npm ci
+
+      - name: Compile @busgo/types
+        run: npm run build --workspace=@busgo/types
+
+      - name: Compile Server Workspace
+        run: npm run build --workspace=busgo-server
+
+      - name: Build Next.js Production App (Turbopack)
+        run: npm run build --workspace=frontend
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+          NODE_ENV: production
+
+  # -------------------------------------------------------------------
+  # 3. Docker Compose & Reverse Proxy Syntax Validation
+  # -------------------------------------------------------------------
+  docker-ci:
+    name: Dockerfile & Reverse Proxy Schema Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Validate Docker Compose Configuration
+        run: |
+          docker compose config --quiet
+
+      - name: Validate Caddyfile Reverse Proxy
+        run: |
+          docker run --rm -v $(pwd)/Caddyfile:/etc/caddy/Caddyfile caddy:2.8-alpine caddy validate --config /etc/caddy/Caddyfile
+
+      - name: Validate Nginx Configuration
+        run: |
+          docker run --rm -v $(pwd)/nginx/nginx.conf:/etc/nginx/nginx.conf nginx:alpine nginx -t

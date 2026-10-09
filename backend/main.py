@@ -43,6 +43,7 @@ from backend import reconciliation
 from backend import telemetry_listener
 from backend import escpos
 from backend import ussd
+from backend import rate_limiter
 from backend.telemetry_listener import (
     HardwareTelemetryTCPServer,
     process_telemetry_point,
@@ -1133,8 +1134,11 @@ async def register_user(payload: RegisterRequest, db=Depends(get_async_db)):
 
 
 @app.post("/api/auth/login", response_model=AuthResponse)
-async def login(payload: LoginRequest, db=Depends(get_async_db)):
+async def login(payload: LoginRequest, request: Request, db=Depends(get_async_db)):
     """Exchange email + password for a JWT access token."""
+    ip = rate_limiter.get_client_ip(request)
+    rate_limiter.enforce_rate_limit(f"login:{ip}", max_requests=10, window_seconds=60, action_label="login")
+
     user = (
         await db.execute(select(User).where(User.email == payload.email))
     ).scalars().first()
@@ -2350,6 +2354,13 @@ async def daraja_stk(payload: DarajaStkRequest, db=Depends(get_async_db), curren
     When MPESA_* env credentials are configured, sends a real STK push to the user's phone.
     If not configured or payload.simulate is True, creates a simulated STK request for testing.
     """
+    rate_limiter.enforce_rate_limit(
+        f"daraja_stk:{payload.phone_number}",
+        max_requests=6,
+        window_seconds=60,
+        action_label="M-Pesa payment prompt",
+    )
+
     booking = (await db.execute(
         text("SELECT id, user_id FROM bookings WHERE id = :id;"), {"id": payload.booking_id}
     )).mappings().first()
@@ -9000,6 +9011,11 @@ async def handle_ussd_webhook(request: Request, db: AsyncSession = Depends(get_a
 
     if not phone_number:
         return PlainTextResponse("END Invalid USSD request: Phone number missing.", media_type="text/plain")
+
+    try:
+        rate_limiter.enforce_rate_limit(f"ussd:{phone_number}", max_requests=60, window_seconds=60, action_label="USSD dial")
+    except HTTPException:
+        return PlainTextResponse("END Too many requests. Please wait a moment before dialing *384# again.", media_type="text/plain")
 
     result = await ussd.process_ussd_step(
         db=db,
