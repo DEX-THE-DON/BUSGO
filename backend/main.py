@@ -84,6 +84,7 @@ from backend.models import (
     TravelVoucher,
     UssdSession,
     UssdLog,
+    StageQueueEntry,
 )
 
 app = FastAPI(title="BUSGO API", version="1.0.0")
@@ -9090,6 +9091,367 @@ async def get_ussd_logs(limit: int = 100, db: AsyncSession = Depends(get_async_d
             for l in logs
         ],
     }
+
+
+# =====================================================================
+# STAGE MARSHALL FIRST-IN, FIRST-OUT (FIFO) LOADING BAY QUEUE ROSTER
+# =====================================================================
+
+class StageQueueCheckinRequest(BaseModel):
+    route_id: int
+    vehicle_id: int
+    driver_id: Optional[int] = None
+    stage_name: Optional[str] = "Main Loading Bay"
+    trip_name: Optional[str] = None
+
+
+@app.get("/api/stage-queue")
+async def get_stage_queue(
+    route_id: Optional[int] = None,
+    stage_name: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    Retrieve active FIFO vehicle lineup for the Stage Marshall.
+    Position 1 = Loading Bay (Active Bookings)
+    Position 2 = On-Deck
+    Position 3+ = Holding Yard
+    """
+    query = (
+        select(StageQueueEntry)
+        .where(StageQueueEntry.status.in_(["loading", "waiting", "grounded"]))
+        .order_by(StageQueueEntry.position.asc())
+    )
+    if route_id:
+        query = query.where(StageQueueEntry.route_id == route_id)
+    if stage_name:
+        query = query.where(StageQueueEntry.stage_name == stage_name)
+
+    rows = (await db.execute(query)).scalars().all()
+
+    queue_entries = []
+    for entry in rows:
+        # Fetch vehicle details, capacity & plate
+        v_row = (await db.execute(
+            text("""
+                SELECT v.plate_number, v.vehicle_type_id, vt.seat_capacity, s.name AS sacco_name,
+                       u.full_name AS driver_name, u.phone AS driver_phone
+                FROM vehicles v
+                LEFT JOIN vehicle_types vt ON vt.id = v.vehicle_type_id
+                LEFT JOIN saccos s ON s.id = v.sacco_id
+                LEFT JOIN users u ON u.id = :driver_id
+                WHERE v.id = :vehicle_id
+            """),
+            {"vehicle_id": entry.vehicle_id, "driver_id": entry.driver_id or 0},
+        )).mappings().one_or_none()
+
+        plate = v_row["plate_number"] if v_row else "KDA 000X"
+        capacity = v_row["seat_capacity"] if v_row and v_row["seat_capacity"] else 14
+        sacco_name = v_row["sacco_name"] if v_row else "BUSGO Sacco"
+        driver_name = v_row["driver_name"] if v_row else "Stage Driver"
+        driver_phone = v_row["driver_phone"] if v_row else "—"
+
+        # Check occupancy on active trip
+        booked_count = 0
+        if entry.trip_id:
+            b_count_row = (await db.execute(
+                text("""
+                    SELECT COUNT(*) AS cnt FROM bookings
+                    WHERE trip_id = :tid AND status IN ('confirmed', 'pending', 'boarded');
+                """),
+                {"tid": entry.trip_id},
+            )).scalar()
+            booked_count = b_count_row or 0
+
+        load_percentage = min(100, int((booked_count / capacity) * 100)) if capacity > 0 else 0
+
+        # Check compliance status
+        comp_row = (await db.execute(
+            text("SELECT is_grounded, grounded_reason FROM vehicle_compliance WHERE vehicle_id = :vid;"),
+            {"vid": entry.vehicle_id},
+        )).mappings().one_or_none()
+
+        is_compliant = not (comp_row["is_grounded"] if comp_row else False)
+        auto_grounded = comp_row["is_grounded"] if comp_row else False
+        grounding_reason = comp_row["grounded_reason"] if comp_row else None
+
+        queue_entries.append({
+            "id": entry.id,
+            "route_id": entry.route_id,
+            "stage_name": entry.stage_name,
+            "vehicle_id": entry.vehicle_id,
+            "plate_number": plate,
+            "sacco_name": sacco_name,
+            "capacity": capacity,
+            "driver_id": entry.driver_id,
+            "driver_name": driver_name,
+            "driver_phone": driver_phone,
+            "trip_id": entry.trip_id,
+            "position": entry.position,
+            "status": entry.status,
+            "booked_seats": booked_count,
+            "load_percentage": load_percentage,
+            "is_full": booked_count >= capacity,
+            "is_compliant": is_compliant,
+            "auto_grounded": auto_grounded,
+            "grounding_reason": grounding_reason,
+            "checked_in_at": entry.checked_in_at.isoformat() if entry.checked_in_at else None,
+        })
+
+    return {
+        "count": len(queue_entries),
+        "queue": queue_entries,
+    }
+
+
+@app.post("/api/stage-queue/checkin")
+async def checkin_vehicle_to_stage_queue(
+    payload: StageQueueCheckinRequest,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Stage Marshall checks in an arriving vehicle into the terminal queue.
+    Validates NTSA compliance before queueing.
+    """
+    # 1. Enforce NTSA Safety Compliance Check
+    comp_row = (await db.execute(
+        text("SELECT is_grounded, grounded_reason FROM vehicle_compliance WHERE vehicle_id = :vid;"),
+        {"vid": payload.vehicle_id},
+    )).mappings().one_or_none()
+
+    if comp_row and comp_row["is_grounded"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Vehicle grounded by NTSA Compliance Sweeper: {comp_row.get('grounded_reason') or 'Statutory non-compliance'}. Cannot enter loading bay.",
+        )
+
+    # 2. Check if driver has valid PSV badge
+    driver_id = payload.driver_id
+    if driver_id:
+        driver = (await db.execute(select(User).where(User.id == driver_id))).scalar_one_or_none()
+        if driver and driver.psv_badge_expiry:
+            now = datetime.now(timezone.utc)
+            badge_exp = driver.psv_badge_expiry
+            if badge_exp.tzinfo is None:
+                badge_exp = badge_exp.replace(tzinfo=timezone.utc)
+            if badge_exp < now:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Driver {driver.full_name} PSV badge expired on {badge_exp.strftime('%Y-%m-%d')}. Grounded until renewed.",
+                )
+
+    # 3. Check if vehicle is already in active queue
+    existing = (await db.execute(
+        select(StageQueueEntry).where(
+            StageQueueEntry.vehicle_id == payload.vehicle_id,
+            StageQueueEntry.status.in_(["loading", "waiting"]),
+        )
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Vehicle is already in active queue at Position #{existing.position}.",
+        )
+
+    # 4. Determine Queue Position
+    active_in_queue = (await db.execute(
+        select(StageQueueEntry)
+        .where(
+            StageQueueEntry.route_id == payload.route_id,
+            StageQueueEntry.status.in_(["loading", "waiting"]),
+        )
+        .order_by(StageQueueEntry.position.desc())
+    )).scalars().all()
+
+    next_position = (active_in_queue[0].position + 1) if active_in_queue else 1
+    initial_status = "loading" if next_position == 1 else "waiting"
+
+    # 5. Attach or create Trip for active departure
+    trip_id = None
+    v_info = (await db.execute(
+        select(Vehicle).where(Vehicle.id == payload.vehicle_id)
+    )).scalar_one_or_none()
+
+    r_info = (await db.execute(
+        select(Route).where(Route.id == payload.route_id)
+    )).scalar_one_or_none()
+
+    if r_info and v_info:
+        trip_name = payload.trip_name or f"{r_info.name} ({datetime.now().strftime('%I:%M %p')})"
+        trip = Trip(
+            route_id=payload.route_id,
+            vehicle_id=payload.vehicle_id,
+            driver_id=payload.driver_id or v_info.driver_id,
+            name=trip_name,
+            status="boarding" if initial_status == "loading" else "scheduled",
+            scheduled_at=datetime.now(timezone.utc),
+            fixed_price=r_info.base_fare,
+        )
+        db.add(trip)
+        await db.flush()
+        trip_id = trip.id
+
+    entry = StageQueueEntry(
+        route_id=payload.route_id,
+        sacco_id=v_info.sacco_id if v_info else None,
+        stage_name=payload.stage_name or "Main Loading Bay",
+        vehicle_id=payload.vehicle_id,
+        driver_id=payload.driver_id or (v_info.driver_id if v_info else None),
+        trip_id=trip_id,
+        position=next_position,
+        status=initial_status,
+    )
+    db.add(entry)
+    await db.commit()
+    await db.refresh(entry)
+
+    # Broadcast WebSocket update
+    await manager.broadcast({
+        "event": "stage_queue_updated",
+        "action": "checkin",
+        "route_id": payload.route_id,
+        "entry_id": entry.id,
+        "position": entry.position,
+        "status": entry.status,
+    })
+
+    return {
+        "ok": True,
+        "message": f"Vehicle checked in successfully to Position #{entry.position} ({entry.status.upper()})",
+        "entry_id": entry.id,
+        "position": entry.position,
+        "status": entry.status,
+        "trip_id": trip_id,
+    }
+
+
+@app.post("/api/stage-queue/{entry_id}/dispatch")
+async def dispatch_loading_bay_vehicle(
+    entry_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Stage Marshall dispatches the vehicle currently in Position 1 (Loading Bay).
+    Advances Position 2 to Position 1, shifts all downstream positions up.
+    """
+    entry = (await db.execute(
+        select(StageQueueEntry).where(StageQueueEntry.id == entry_id)
+    )).scalar_one_or_none()
+
+    if not entry:
+        raise HTTPException(status_code=404, detail="Queue entry not found.")
+
+    route_id = entry.route_id
+
+    # Mark current vehicle as dispatched
+    entry.status = "dispatched"
+    entry.dispatched_at = datetime.now(timezone.utc)
+
+    # Advance Trip status to in_transit
+    if entry.trip_id:
+        trip = (await db.execute(select(Trip).where(Trip.id == entry.trip_id))).scalar_one_or_none()
+        if trip:
+            trip.status = "in_transit"
+
+    # Shift all remaining vehicles in this route's queue
+    remaining_rows = (await db.execute(
+        select(StageQueueEntry)
+        .where(
+            StageQueueEntry.route_id == route_id,
+            StageQueueEntry.status.in_(["loading", "waiting"]),
+            StageQueueEntry.id != entry.id,
+        )
+        .order_by(StageQueueEntry.position.asc())
+    )).scalars().all()
+
+    for idx, rem in enumerate(remaining_rows):
+        rem.position = idx + 1
+        if rem.position == 1:
+            rem.status = "loading"
+            # Update trip to boarding
+            if rem.trip_id:
+                t = (await db.execute(select(Trip).where(Trip.id == rem.trip_id))).scalar_one_or_none()
+                if t:
+                    t.status = "boarding"
+        else:
+            rem.status = "waiting"
+
+    await db.commit()
+
+    # Broadcast WebSocket update
+    await manager.broadcast({
+        "event": "stage_queue_updated",
+        "action": "dispatch",
+        "route_id": route_id,
+        "dispatched_entry_id": entry_id,
+        "next_loading_entry_id": remaining_rows[0].id if remaining_rows else None,
+    })
+
+    return {
+        "ok": True,
+        "message": f"Vehicle dispatched successfully. Next vehicle advanced to Loading Bay (Position #1).",
+        "remaining_count": len(remaining_rows),
+    }
+
+
+@app.post("/api/stage-queue/{entry_id}/skip")
+async def skip_queue_vehicle(
+    entry_id: int,
+    db: AsyncSession = Depends(get_async_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Stage Marshall pauses or bumps a vehicle (e.g. driver fueling or maintenance).
+    Moves it to the end of the waiting queue.
+    """
+    entry = (await db.execute(
+        select(StageQueueEntry).where(StageQueueEntry.id == entry_id)
+    )).scalar_one_or_none()
+
+    if not entry:
+        raise HTTPException(status_code=404, detail="Queue entry not found.")
+
+    route_id = entry.route_id
+
+    # Get max position
+    other_rows = (await db.execute(
+        select(StageQueueEntry)
+        .where(
+            StageQueueEntry.route_id == route_id,
+            StageQueueEntry.status.in_(["loading", "waiting"]),
+            StageQueueEntry.id != entry.id,
+        )
+        .order_by(StageQueueEntry.position.asc())
+    )).scalars().all()
+
+    # Re-index others starting at 1
+    for idx, rem in enumerate(other_rows):
+        rem.position = idx + 1
+        if rem.position == 1:
+            rem.status = "loading"
+        else:
+            rem.status = "waiting"
+
+    # Place bumped entry at the tail
+    entry.position = len(other_rows) + 1
+    entry.status = "waiting"
+
+    await db.commit()
+
+    await manager.broadcast({
+        "event": "stage_queue_updated",
+        "action": "skip",
+        "route_id": route_id,
+        "bumped_entry_id": entry_id,
+    })
+
+    return {
+        "ok": True,
+        "message": f"Vehicle bumped to the back of the queue (Position #{entry.position}).",
+    }
+
 
 
 

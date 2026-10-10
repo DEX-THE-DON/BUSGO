@@ -647,3 +647,31 @@ class UssdLog(Base):
     response_text = Column(Text, nullable=False)
     created_at = Column(TIMESTAMP(timezone=True), default=func.now())
 
+
+class StageQueueEntry(Base):
+    """
+    First-In, First-Out (FIFO) Loading Bay Queue & Stage Marshall Roster.
+    Manages terminal vehicle lineup: Position 1 (Active Loading Bay),
+    Position 2 (On Deck), Position 3+ (Holding Yard).
+    Prevents queueing of NTSA-grounded vehicles or unbadged drivers.
+    """
+    __tablename__ = 'stage_queue_entries'
+
+    id = Column(Integer, primary_key=True, index=True)
+    route_id = Column(Integer, ForeignKey('routes.id'), nullable=False, index=True)
+    sacco_id = Column(Integer, ForeignKey('saccos.id'), nullable=True)
+    stage_name = Column(String, nullable=False, default='Main Loading Bay')
+    vehicle_id = Column(Integer, ForeignKey('vehicles.id'), nullable=False)
+    driver_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    trip_id = Column(Integer, ForeignKey('trips.id'), nullable=True)
+    position = Column(Integer, nullable=False, default=1)
+    status = Column(String, nullable=False, default='loading')  # 'loading', 'waiting', 'dispatched', 'skipped', 'grounded'
+    checked_in_at = Column(TIMESTAMP(timezone=True), default=func.now())
+    dispatched_at = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    route = relationship('Route')
+    vehicle = relationship('Vehicle')
+    driver = relationship('User', foreign_keys=[driver_id])
+    trip = relationship('Trip')
+
+

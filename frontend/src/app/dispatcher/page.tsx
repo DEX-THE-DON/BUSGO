@@ -25,6 +25,7 @@ import {
   syncOfflineWalkins,
   PendingOfflineWalkin,
 } from '@/lib/offlineStore';
+import StageQueueRoster from '@/components/dispatcher/StageQueueRoster';
 
 export default function StageDispatcherPage() {
   const [trips, setTrips] = useState<TripOption[]>([]);
@@ -383,6 +384,11 @@ export default function StageDispatcherPage() {
             <button onClick={() => setSuccessMsg('')} className="text-slate-400 hover:text-white">✕</button>
           </div>
         )}
+      </div>
+
+      {/* Stage Marshall FIFO Loading Bay Lineup */}
+      <div className="max-w-7xl mx-auto mb-8">
+        <StageQueueRoster onTripSelected={(id) => setSelectedTripId(id)} />
       </div>
 
       <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-8">

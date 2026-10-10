@@ -1795,6 +1795,70 @@ export async function fetchUssdLogs(limit: number = 100): Promise<{
   return apiFetch(`/api/ussd/logs?limit=${limit}`);
 }
 
+// ---------------------------------------------------------------------------
+// 10. Stage Marshall FIFO Loading Bay Queue Roster
+// ---------------------------------------------------------------------------
+
+export interface StageQueueItem {
+  id: number;
+  route_id: number;
+  stage_name: string;
+  vehicle_id: number;
+  plate_number: string;
+  sacco_name: string;
+  capacity: number;
+  driver_id: number | null;
+  driver_name: string;
+  driver_phone: string;
+  trip_id: number | null;
+  position: number;
+  status: 'loading' | 'waiting' | 'dispatched' | 'grounded' | 'skipped';
+  booked_seats: number;
+  load_percentage: number;
+  is_full: boolean;
+  is_compliant: boolean;
+  auto_grounded: boolean;
+  grounding_reason: string | null;
+  checked_in_at: string | null;
+}
+
+export async function fetchStageQueue(
+  routeId?: number,
+  stageName?: string
+): Promise<{ count: number; queue: StageQueueItem[] }> {
+  const params = new URLSearchParams();
+  if (routeId) params.append('route_id', String(routeId));
+  if (stageName) params.append('stage_name', stageName);
+  const q = params.toString() ? `?${params.toString()}` : '';
+  return apiFetch(`/api/stage-queue${q}`);
+}
+
+export async function checkinStageQueue(payload: {
+  route_id: number;
+  vehicle_id: number;
+  driver_id?: number;
+  stage_name?: string;
+  trip_name?: string;
+}): Promise<{ ok: boolean; message: string; entry_id: number; position: number; status: string; trip_id?: number }> {
+  return apiFetch('/api/stage-queue/checkin', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function dispatchStageQueue(entryId: number): Promise<{ ok: boolean; message: string; remaining_count: number }> {
+  return apiFetch(`/api/stage-queue/${entryId}/dispatch`, {
+    method: 'POST',
+  });
+}
+
+export async function skipStageQueue(entryId: number): Promise<{ ok: boolean; message: string }> {
+  return apiFetch(`/api/stage-queue/${entryId}/skip`, {
+    method: 'POST',
+  });
+}
+
+
 
 
 
