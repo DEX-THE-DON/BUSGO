@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import QRCodeSVG from './QRCodeSVG';
 import { IconEmblem, IconTicket } from './dashboard/FluxIcons';
-import { dispatchBookingTicket, fetchBookingDispatchPreview } from '@/services/api';
+import { dispatchBookingTicket, fetchBookingDispatchPreview, fetchBoardingPassMetadata } from '@/services/api';
 import PrintableTicketModal, { TicketData } from './user/PrintableTicketModal';
 
 export interface TicketBookingData {
@@ -43,6 +43,7 @@ export default function DigitalTicketModal({
   const [dispatchError, setDispatchError] = useState('');
   const [waLink, setWaLink] = useState('');
   const [showPrintModal, setShowPrintModal] = useState(false);
+  const [signedQrToken, setSignedQrToken] = useState<string>('');
 
   useEffect(() => {
     if (!booking?.id) return;
@@ -51,11 +52,17 @@ export default function DigitalTicketModal({
         if (res?.preview?.wa_link) setWaLink(res.preview.wa_link);
       })
       .catch(() => {});
+
+    fetchBoardingPassMetadata(booking.id)
+      .then((meta) => {
+        if (meta?.qr_token) setSignedQrToken(meta.qr_token);
+      })
+      .catch(() => {});
   }, [booking?.id]);
 
   if (!booking) return null;
 
-  const ticketCode = `BUSGO:${booking.id}:${booking.trip_id}:${booking.seat_number}`;
+  const ticketCode = signedQrToken || `BUSGO:${booking.id}:${booking.trip_id}:${booking.seat_number}`;
   const displayRef = `BG-${booking.id.toString().padStart(4, '0')}-${booking.seat_number}`;
   const isBoarded = booking.status === 'boarded';
   const isPaid = booking.payment_status === 'paid';
@@ -299,11 +306,21 @@ export default function DigitalTicketModal({
           </div>
 
           <div className="flex items-center gap-3">
+            <a
+              href={`/api/bookings/${booking.id}/boarding-pass.pdf`}
+              target="_blank"
+              rel="noopener noreferrer"
+              download={`BUSGO-BoardingPass-${booking.id}.pdf`}
+              className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-black transition flex items-center gap-1.5 shadow-lg shadow-blue-900/30 cursor-pointer"
+              title="Download official high-resolution vector PDF boarding pass"
+            >
+              <span>⬇ Download PDF</span>
+            </a>
             <button
               onClick={() => setShowPrintModal(true)}
               className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black transition flex items-center gap-1.5 shadow-lg shadow-emerald-900/30 cursor-pointer"
             >
-              <span>🖨️ PDF & POS Tickets</span>
+              <span>🖨️ Thermal POS Slip</span>
             </button>
             <button
               onClick={onClose}

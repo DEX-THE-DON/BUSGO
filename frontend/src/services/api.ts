@@ -1858,6 +1858,77 @@ export async function skipStageQueue(entryId: number): Promise<{ ok: boolean; me
   });
 }
 
+export interface BoardingPassMetadata {
+  ok: boolean;
+  booking_id: number;
+  trip_id: number;
+  ticket_ref: string;
+  qr_token: string;
+  qr_svg: string;
+  pdf_url: string;
+  passenger_name: string;
+  passenger_phone: string | null;
+  seat_number: number;
+  status: string;
+  payment_status: string;
+  route_name?: string;
+  trip_name?: string;
+  board_stop: string;
+  alight_stop: string;
+  departure_time: string | null;
+  vehicle_plate?: string;
+  vehicle_model?: string;
+  sacco_name?: string;
+  receipt_number?: string;
+}
+
+export interface TicketVerifyResponse {
+  valid: boolean;
+  tampered: boolean;
+  is_boarded?: boolean;
+  wrong_trip?: boolean;
+  reason?: string;
+  message?: string;
+  booking_id?: number;
+  trip_id?: number;
+  seat_number?: number;
+  passenger_name?: string;
+  phone?: string;
+  route_name?: string;
+  trip_name?: string;
+  vehicle_plate?: string;
+}
+
+export function getBoardingPassPdfUrl(bookingId: number): string {
+  const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  return `${base}/api/bookings/${bookingId}/boarding-pass.pdf`;
+}
+
+export async function fetchBoardingPassMetadata(bookingId: number): Promise<BoardingPassMetadata> {
+  return apiFetch<BoardingPassMetadata>(`/api/bookings/${bookingId}/boarding-pass`);
+}
+
+export async function verifyTicketCode(ticketCode: string, tripId?: number): Promise<TicketVerifyResponse> {
+  return apiFetch<TicketVerifyResponse>('/api/tickets/verify', {
+    method: 'POST',
+    body: JSON.stringify({ ticket_code: ticketCode, trip_id: tripId }),
+  });
+}
+
+export async function simulateWhatsAppMessage(phone: string, message: string, name?: string) {
+  return apiFetch<{
+    ok: boolean;
+    sender: string;
+    incoming_text: string;
+    reply_body: string;
+    reply_dispatch_id: number;
+  }>('/api/webhooks/whatsapp/simulate', {
+    method: 'POST',
+    body: JSON.stringify({ phone, message, name }),
+  });
+}
+
+
 
 
 

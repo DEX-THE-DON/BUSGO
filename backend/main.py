@@ -12,7 +12,7 @@ logger = logging.getLogger("busgo")
 
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,6 +44,8 @@ from backend import telemetry_listener
 from backend import escpos
 from backend import ussd
 from backend import rate_limiter
+from backend import boarding_pass
+from backend import whatsapp_webhook
 from backend.telemetry_listener import (
     HardwareTelemetryTCPServer,
     process_telemetry_point,
@@ -1491,13 +1493,22 @@ async def board_passenger(
 
     booking_id = payload.booking_id
     if not booking_id and payload.ticket_code:
-        # Standard format: BUSGO-{booking_id}-{trip_id}-{seat_number} or BG-{booking_id}-{seat_number}
         code = payload.ticket_code.strip()
-        parts = code.replace(":", "-").split("-")
-        for part in parts:
-            if part.isdigit():
-                booking_id = int(part)
-                break
+        v_token = boarding_pass.verify_ticket_hmac_token(code)
+        if v_token.get("tampered"):
+            raise HTTPException(
+                status_code=400,
+                detail="Security validation failed: Cryptographic signature mismatch! Ticket code is forged or tampered."
+            )
+        if v_token.get("valid") and v_token.get("booking_id"):
+            booking_id = v_token["booking_id"]
+        else:
+            # Standard legacy format: BUSGO-{booking_id}-{trip_id}-{seat_number} or BG-{booking_id}-{seat_number}
+            parts = code.replace(":", "-").split("-")
+            for part in parts:
+                if part.isdigit():
+                    booking_id = int(part)
+                    break
 
     if not booking_id:
         raise HTTPException(status_code=400, detail="Valid booking_id or ticket_code is required.")
@@ -2855,6 +2866,326 @@ async def get_parcel_escpos_slip(
         "parcel": parcel_dict,
     }
 
+
+# ==============================================================================
+# Cryptographic Boarding Pass PDF & Ticket Verification Endpoints
+# ==============================================================================
+
+class TicketVerifyRequest(BaseModel):
+    ticket_code: str
+    trip_id: Optional[int] = None
+
+
+class SimulateWhatsAppRequest(BaseModel):
+    phone: str = "0716314831"
+    message: str = "1"
+    name: Optional[str] = "Commuter"
+
+
+@app.get("/api/bookings/{booking_id}/boarding-pass.pdf")
+async def get_booking_boarding_pass_pdf(
+    booking_id: int,
+    db=Depends(get_async_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """
+    Generates and streams a vector PDF-1.4 E-Boarding Pass with embedded
+    cryptographic HMAC-SHA256 anti-tamper QR code.
+    """
+    query = text("""
+        SELECT
+            b.id, b.trip_id, b.seat_number, b.board_stop_order, b.alight_stop_order,
+            b.status, b.payment_status, b.user_id, b.has_luggage, b.luggage_count, b.luggage_fee,
+            u.full_name AS passenger_name, u.phone AS passenger_phone,
+            t.name AS trip_name, t.scheduled_at AS departure_time,
+            t.fixed_price,
+            r.name AS route_name, r.base_fare,
+            v.plate_number AS vehicle_plate,
+            vt.display_name AS vehicle_model,
+            s.name AS sacco_name,
+            p.receipt_number, p.amount AS payment_amount
+        FROM bookings b
+        JOIN trips t ON t.id = b.trip_id
+        JOIN routes r ON r.id = t.route_id
+        LEFT JOIN users u ON u.id = b.user_id
+        LEFT JOIN vehicles v ON v.id = t.vehicle_id
+        LEFT JOIN vehicle_types vt ON vt.id = v.vehicle_type_id
+        LEFT JOIN saccos s ON s.id = v.sacco_id
+        LEFT JOIN payments p ON p.booking_id = b.id
+        WHERE b.id = :id;
+    """)
+    row = (await db.execute(query, {"id": booking_id})).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Booking not found.")
+
+    b_dict = dict(row)
+
+    # Fetch stop names
+    stops_res = await db.execute(
+        text("SELECT stop_name, stop_order FROM route_stops rs JOIN trips t ON t.route_id = rs.route_id WHERE t.id = :tid ORDER BY rs.stop_order ASC;"),
+        {"tid": b_dict.get("trip_id", 1)},
+    )
+    stop_map = {s["stop_order"]: s["stop_name"] for s in stops_res.mappings().all()}
+    b_dict["board_stop"] = stop_map.get(b_dict.get("board_stop_order"), f"Stop #{b_dict.get('board_stop_order')}")
+    b_dict["alight_stop"] = stop_map.get(b_dict.get("alight_stop_order"), f"Stop #{b_dict.get('alight_stop_order')}")
+
+    pdf_bytes = boarding_pass.generate_boarding_pass_pdf(b_dict)
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="BUSGO-BoardingPass-{booking_id}.pdf"',
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
+
+@app.get("/api/bookings/{booking_id}/boarding-pass")
+async def get_booking_boarding_pass_metadata(
+    booking_id: int,
+    db=Depends(get_async_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """
+    Returns complete E-Boarding Pass payload: signed HMAC QR token, SVG QR markup,
+    and PDF download direct URI.
+    """
+    query = text("""
+        SELECT
+            b.id, b.trip_id, b.seat_number, b.board_stop_order, b.alight_stop_order,
+            b.status, b.payment_status, b.user_id, b.has_luggage, b.luggage_count, b.luggage_fee,
+            u.full_name AS passenger_name, u.phone AS passenger_phone,
+            t.name AS trip_name, t.scheduled_at AS departure_time,
+            t.fixed_price,
+            r.name AS route_name, r.base_fare,
+            v.plate_number AS vehicle_plate,
+            vt.display_name AS vehicle_model,
+            s.name AS sacco_name,
+            p.receipt_number, p.amount AS payment_amount
+        FROM bookings b
+        JOIN trips t ON t.id = b.trip_id
+        JOIN routes r ON r.id = t.route_id
+        LEFT JOIN users u ON u.id = b.user_id
+        LEFT JOIN vehicles v ON v.id = t.vehicle_id
+        LEFT JOIN vehicle_types vt ON vt.id = v.vehicle_type_id
+        LEFT JOIN saccos s ON s.id = v.sacco_id
+        LEFT JOIN payments p ON p.booking_id = b.id
+        WHERE b.id = :id;
+    """)
+    row = (await db.execute(query, {"id": booking_id})).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Booking not found.")
+
+    b_dict = dict(row)
+
+    # Fetch stop names
+    stops_res = await db.execute(
+        text("SELECT stop_name, stop_order FROM route_stops rs JOIN trips t ON t.route_id = rs.route_id WHERE t.id = :tid ORDER BY rs.stop_order ASC;"),
+        {"tid": b_dict.get("trip_id", 1)},
+    )
+    stop_map = {s["stop_order"]: s["stop_name"] for s in stops_res.mappings().all()}
+    board_stop = stop_map.get(b_dict.get("board_stop_order"), f"Stop #{b_dict.get('board_stop_order')}")
+    alight_stop = stop_map.get(b_dict.get("alight_stop_order"), f"Stop #{b_dict.get('alight_stop_order')}")
+
+    # Cryptographic HMAC Signed Token & SVG
+    qr_token = boarding_pass.generate_ticket_hmac_token(b_dict["id"], b_dict["trip_id"], b_dict["seat_number"])
+    qr_svg = boarding_pass.generate_qr_svg(qr_token, size_px=180)
+
+    display_ref = f"BG-{b_dict['id']:04d}-{b_dict['seat_number']}"
+
+    return {
+        "ok": True,
+        "booking_id": b_dict["id"],
+        "trip_id": b_dict["trip_id"],
+        "ticket_ref": display_ref,
+        "qr_token": qr_token,
+        "qr_svg": qr_svg,
+        "pdf_url": f"/api/bookings/{b_dict['id']}/boarding-pass.pdf",
+        "passenger_name": b_dict.get("passenger_name") or "Commuter Passenger",
+        "passenger_phone": b_dict.get("passenger_phone"),
+        "seat_number": b_dict["seat_number"],
+        "status": b_dict["status"],
+        "payment_status": b_dict["payment_status"],
+        "route_name": b_dict.get("route_name"),
+        "trip_name": b_dict.get("trip_name"),
+        "board_stop": board_stop,
+        "alight_stop": alight_stop,
+        "departure_time": b_dict.get("departure_time").isoformat() if b_dict.get("departure_time") else None,
+        "vehicle_plate": b_dict.get("vehicle_plate"),
+        "vehicle_model": b_dict.get("vehicle_model"),
+        "sacco_name": b_dict.get("sacco_name"),
+        "receipt_number": b_dict.get("receipt_number"),
+    }
+
+
+@app.post("/api/tickets/verify")
+async def verify_ticket_code(
+    payload: TicketVerifyRequest,
+    db=Depends(get_async_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """
+    Offline/Online Ticket Verification:
+    Validates HMAC cryptographic signature and checks database booking authenticity.
+    """
+    v_token = boarding_pass.verify_ticket_hmac_token(payload.ticket_code)
+    if v_token.get("tampered"):
+        return {
+            "valid": False,
+            "tampered": True,
+            "reason": "CRITICAL: Ticket QR signature mismatch! Code has been forged or altered.",
+            "ticket_code": payload.ticket_code,
+        }
+
+    booking_id = v_token.get("booking_id")
+    if not booking_id:
+        return {
+            "valid": False,
+            "tampered": False,
+            "reason": v_token.get("reason", "Invalid ticket token format."),
+            "ticket_code": payload.ticket_code,
+        }
+
+    query = text("""
+        SELECT
+            b.id, b.trip_id, b.seat_number, b.board_stop_order, b.alight_stop_order,
+            b.status, b.payment_status,
+            u.full_name, u.phone,
+            t.name as trip_name, t.scheduled_at,
+            r.name as route_name,
+            v.plate_number
+        FROM bookings b
+        JOIN trips t ON t.id = b.trip_id
+        JOIN routes r ON r.id = t.route_id
+        LEFT JOIN users u ON u.id = b.user_id
+        LEFT JOIN vehicles v ON v.id = t.vehicle_id
+        WHERE b.id = :id;
+    """)
+    booking = (await db.execute(query, {"id": booking_id})).mappings().first()
+    if not booking:
+        return {
+            "valid": False,
+            "tampered": False,
+            "reason": f"Booking #{booking_id} does not exist in central ledger.",
+            "ticket_code": payload.ticket_code,
+        }
+
+    # Verify trip match if trip_id provided
+    if payload.trip_id and booking["trip_id"] != payload.trip_id:
+        return {
+            "valid": False,
+            "tampered": False,
+            "wrong_trip": True,
+            "reason": f"Wrong Bus! This ticket is for Trip #{booking['trip_id']} ({booking['trip_name']}), not Trip #{payload.trip_id}.",
+            "booking_id": booking["id"],
+            "trip_id": booking["trip_id"],
+            "seat_number": booking["seat_number"],
+        }
+
+    is_boarded = booking["status"] == "boarded"
+    return {
+        "valid": True,
+        "tampered": False,
+        "is_boarded": is_boarded,
+        "booking_id": booking["id"],
+        "trip_id": booking["trip_id"],
+        "seat_number": booking["seat_number"],
+        "passenger_name": booking["full_name"] or "Commuter",
+        "phone": booking["phone"],
+        "route_name": booking["route_name"],
+        "trip_name": booking["trip_name"],
+        "vehicle_plate": booking["plate_number"],
+        "status": booking["status"],
+        "payment_status": booking["payment_status"],
+        "message": "Already Boarded" if is_boarded else "Valid Authentic Ticket",
+    }
+
+
+# ==============================================================================
+# Two-Way Inbound WhatsApp Business Webhook Endpoints
+# ==============================================================================
+
+@app.get("/api/webhooks/whatsapp")
+async def verify_whatsapp_webhook(request: Request):
+    """Meta WhatsApp Cloud API verification challenge handler."""
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+
+    if mode == "subscribe" and token == whatsapp_webhook.WHATSAPP_VERIFY_TOKEN:
+        return PlainTextResponse(challenge or "")
+    raise HTTPException(status_code=403, detail="Verification token mismatch.")
+
+
+@app.post("/api/webhooks/whatsapp")
+async def inbound_whatsapp_webhook(request: Request, db=Depends(get_async_db)):
+    """
+    Two-Way Inbound WhatsApp Business Webhook:
+    Processes inbound messages from Meta Cloud API or Twilio WhatsApp and triggers bot replies.
+    """
+    content_type = request.headers.get("content-type", "")
+    sender_phone = ""
+    incoming_text = ""
+    sender_name = None
+
+    if "application/json" in content_type:
+        try:
+            data = await request.json()
+            entry = data.get("entry", [])
+            if entry:
+                changes = entry[0].get("changes", [])
+                if changes:
+                    val = changes[0].get("value", {})
+                    messages = val.get("messages", [])
+                    contacts = val.get("contacts", [])
+                    if contacts:
+                        sender_name = contacts[0].get("profile", {}).get("name")
+                    if messages:
+                        msg_obj = messages[0]
+                        sender_phone = msg_obj.get("from", "")
+                        incoming_text = msg_obj.get("text", {}).get("body", "")
+        except Exception:
+            pass
+    else:
+        # Form urlencoded / Twilio format: From=whatsapp:+254...&Body=...
+        try:
+            form = await request.form()
+            sender_phone = str(form.get("From", "")).replace("whatsapp:", "")
+            incoming_text = str(form.get("Body", ""))
+            sender_name = str(form.get("ProfileName") or "")
+        except Exception:
+            pass
+
+    if not sender_phone or not incoming_text:
+        return {"status": "ignored", "reason": "No sender phone or message body detected."}
+
+    return await whatsapp_webhook.process_inbound_whatsapp_webhook(
+        db=db,
+        sender_phone=sender_phone,
+        incoming_text=incoming_text,
+        sender_name=sender_name,
+        send_reply=True,
+    )
+
+
+@app.post("/api/webhooks/whatsapp/simulate")
+async def simulate_whatsapp_webhook(
+    payload: SimulateWhatsAppRequest,
+    db=Depends(get_async_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    """
+    Local/Admin Interactive WhatsApp Simulator:
+    Simulates incoming WhatsApp messages and returns chatbot responses and outbox logs.
+    """
+    return await whatsapp_webhook.process_inbound_whatsapp_webhook(
+        db=db,
+        sender_phone=payload.phone,
+        incoming_text=payload.message,
+        sender_name=payload.name,
+        send_reply=True,
+    )
 
 
 @app.post("/api/bookings/{booking_id}/reconcile")

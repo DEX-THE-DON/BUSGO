@@ -152,8 +152,21 @@ export async function validateOfflineTicket(
   let bookingId: number | undefined;
   let seatNumber: number | undefined;
 
-  // Format: BUSGO:<booking_id>:<trip_id>:<seat_number> or plain number or ticket code
-  if (rawStr.startsWith('BUSGO:')) {
+  // Format: BG1:<booking_id>:<trip_id>:<seat_number>:<sig> or BUSGO:<booking_id>:<trip_id>:<seat_number> or plain number
+  if (rawStr.startsWith('BG1:')) {
+    const parts = rawStr.split(':');
+    if (parts.length >= 5) {
+      bookingId = parseInt(parts[1], 10);
+      const tokenTripId = parseInt(parts[2], 10);
+      seatNumber = parseInt(parts[3], 10);
+      if (tokenTripId !== tripId) {
+        return {
+          success: false,
+          message: `❌ Wrong Bus! Ticket is for Trip #${tokenTripId}, not Trip #${tripId}.`,
+        };
+      }
+    }
+  } else if (rawStr.startsWith('BUSGO:')) {
     const parts = rawStr.split(':');
     if (parts.length >= 4) {
       bookingId = parseInt(parts[1], 10);

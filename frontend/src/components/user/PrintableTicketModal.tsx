@@ -8,6 +8,7 @@ import {
   downloadRawEscPosFile,
   isWebBluetoothSupported,
 } from '@/lib/escpos';
+import QRCodeSVG from '../QRCodeSVG';
 
 export interface TicketData {
   bookingId: number;
@@ -269,6 +270,17 @@ SAFARI NJEMA - TRAVEL SAFELY WITH BUSGO!
               </>
             )}
 
+            <a
+              href={`/api/bookings/${ticket.bookingId}/boarding-pass.pdf`}
+              target="_blank"
+              rel="noopener noreferrer"
+              download={`BUSGO-BoardingPass-${ticket.bookingId}.pdf`}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-black shadow-lg shadow-blue-900/30 transition cursor-pointer"
+              title="Download official vector PDF boarding pass"
+            >
+              <span>⬇ Official PDF</span>
+            </a>
+
             <button
               onClick={handlePrint}
               className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black shadow-lg shadow-emerald-900/30 transition cursor-pointer"
@@ -394,27 +406,9 @@ SAFARI NJEMA - TRAVEL SAFELY WITH BUSGO!
               {/* Security Optical QR & Barcode Section */}
               <div className="flex flex-col sm:flex-row items-center justify-between gap-6 pt-4 border-t border-dashed border-slate-300">
                 <div className="flex items-center gap-4">
-                  {/* High-contrast printable SVG QR Code representation */}
-                  <div className="p-2 border-2 border-slate-900 rounded-xl bg-white shadow-sm">
-                    <svg viewBox="0 0 100 100" className="w-20 h-20">
-                      {/* Stylized geometric QR markers */}
-                      <rect x="5" y="5" width="30" height="30" fill="none" stroke="#000" strokeWidth="6" />
-                      <rect x="13" y="13" width="14" height="14" fill="#000" />
-                      <rect x="65" y="5" width="30" height="30" fill="none" stroke="#000" strokeWidth="6" />
-                      <rect x="73" y="13" width="14" height="14" fill="#000" />
-                      <rect x="5" y="65" width="30" height="30" fill="none" stroke="#000" strokeWidth="6" />
-                      <rect x="13" y="73" width="14" height="14" fill="#000" />
-                      {/* Mock QR data matrix dots */}
-                      <rect x="42" y="10" width="8" height="8" fill="#000" />
-                      <rect x="52" y="18" width="6" height="6" fill="#000" />
-                      <rect x="42" y="42" width="16" height="16" fill="#000" />
-                      <rect x="65" y="45" width="8" height="8" fill="#000" />
-                      <rect x="78" y="55" width="10" height="6" fill="#000" />
-                      <rect x="15" y="45" width="10" height="8" fill="#000" />
-                      <rect x="42" y="70" width="8" height="12" fill="#000" />
-                      <rect x="65" y="75" width="12" height="8" fill="#000" />
-                      <rect x="85" y="75" width="8" height="16" fill="#000" />
-                    </svg>
+                  {/* High-contrast printable SVG QR Code */}
+                  <div className="p-1 border-2 border-slate-900 rounded-xl bg-white shadow-sm flex items-center justify-center">
+                    <QRCodeSVG value={qrString} size={84} />
                   </div>
 
                   <div>
@@ -486,23 +480,7 @@ SAFARI NJEMA - TRAVEL SAFELY WITH BUSGO!
               <div className="text-center my-3">
                 <p className="text-[10px] font-bold">SCAN TO BOARD</p>
                 <div className="inline-block p-1 border border-black my-1">
-                  <svg viewBox="0 0 100 100" className="w-20 h-20 mx-auto">
-                    <rect x="5" y="5" width="30" height="30" fill="none" stroke="#000" strokeWidth="6" />
-                    <rect x="13" y="13" width="14" height="14" fill="#000" />
-                    <rect x="65" y="5" width="30" height="30" fill="none" stroke="#000" strokeWidth="6" />
-                    <rect x="73" y="13" width="14" height="14" fill="#000" />
-                    <rect x="5" y="65" width="30" height="30" fill="none" stroke="#000" strokeWidth="6" />
-                    <rect x="13" y="73" width="14" height="14" fill="#000" />
-                    <rect x="42" y="10" width="8" height="8" fill="#000" />
-                    <rect x="52" y="18" width="6" height="6" fill="#000" />
-                    <rect x="42" y="42" width="16" height="16" fill="#000" />
-                    <rect x="65" y="45" width="8" height="8" fill="#000" />
-                    <rect x="78" y="55" width="10" height="6" fill="#000" />
-                    <rect x="15" y="45" width="10" height="8" fill="#000" />
-                    <rect x="42" y="70" width="8" height="12" fill="#000" />
-                    <rect x="65" y="75" width="12" height="8" fill="#000" />
-                    <rect x="85" y="75" width="8" height="16" fill="#000" />
-                  </svg>
+                  <QRCodeSVG value={qrString} size={80} />
                 </div>
                 <p className="text-[9px] font-mono break-all">{qrString}</p>
               </div>
